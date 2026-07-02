@@ -1,0 +1,24 @@
+app:
+  name: trading-intelligence-platform
+  environment: local
+
+market_data:
+  exchange: binance
+  symbols:
+    - BTCUSDT
+  source: trade_stream
+
+candles:
+  base_timeframe: 1m
+  derived_timeframes:
+    - 4h
+    - 1d
+    - 1w
+  timezone: UTC
+
+storage:
+  candle_path: data/candles
+  format: parquet
+
+logging:
+  level: INFO
