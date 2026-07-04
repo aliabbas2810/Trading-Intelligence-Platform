@@ -23,6 +23,12 @@ dev = [
 [tool.black]
 line-length = 100
 
+[tool.setuptools.packages.find]
+include = ["backend*"]
+
+[tool.setuptools.package-data]
+"backend.config" = ["default.yaml"]
+
 [tool.ruff]
 line-length = 100
 
