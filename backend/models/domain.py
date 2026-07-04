@@ -39,6 +39,8 @@ class Trade:
 
 @dataclass(frozen=True, slots=True)
 class Candle:
+    """Canonical OHLCV candle model for DATA-002 and FR-201 through FR-204."""
+
     symbol: str
     timeframe: Timeframe
     open_time_ms: int
@@ -48,6 +50,28 @@ class Candle:
     low: float
     close: float
     volume: float
+
+    def __post_init__(self) -> None:
+        """Validate completed candle integrity for FR-201 through FR-204."""
+
+        if not self.symbol:
+            raise ValueError("Candle symbol is required")
+        if self.close_time_ms <= self.open_time_ms:
+            raise ValueError("Candle close_time_ms must be after open_time_ms")
+        for field_name, value in (
+            ("open", self.open),
+            ("high", self.high),
+            ("low", self.low),
+            ("close", self.close),
+        ):
+            if not isfinite(value) or value <= 0:
+                raise ValueError(f"Candle {field_name} must be positive and finite")
+        if not isfinite(self.volume) or self.volume < 0:
+            raise ValueError("Candle volume must be non-negative and finite")
+        if self.high < max(self.open, self.close):
+            raise ValueError("Candle high must be at least open and close")
+        if self.low > min(self.open, self.close):
+            raise ValueError("Candle low must be at most open and close")
 
     @property
     def body_high(self) -> float:
