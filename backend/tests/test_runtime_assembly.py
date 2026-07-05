@@ -178,7 +178,7 @@ def test_live_binance_health_reports_stream_fields() -> None:
 def test_runtime_wires_trade_events_into_existing_candle_pipeline() -> None:
     """Covers RUNTIME-002 integration wiring without duplicating candle logic."""
 
-    runtime = BackendRuntime(mode=RuntimeMode.DRY_RUN)
+    runtime = BackendRuntime(settings=demo_disabled_settings(), mode=RuntimeMode.DRY_RUN)
     runtime.start()
 
     runtime.market_data_pipeline.publish_trade(make_trade(1_000, 100.0))
@@ -254,5 +254,14 @@ def live_enabled_settings(symbol: str = "BTCUSDT") -> PlatformSettings:
                     "max_reconnect_attempts": 3,
                 },
             ),
+        },
+    )
+
+
+def demo_disabled_settings() -> PlatformSettings:
+    settings = load_settings()
+    return settings.model_copy(
+        update={
+            "demo": settings.demo.model_copy(update={"enabled": False}),
         },
     )

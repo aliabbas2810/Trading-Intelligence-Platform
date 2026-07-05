@@ -14,6 +14,11 @@ market_data:
 candles:
   base_timeframe: 1m
   derived_timeframes:
+    - 5m
+    - 15m
+    - 30m
+    - 1h
+    - 2h
     - 4h
     - 1d
     - 1w
@@ -25,3 +30,6 @@ storage:
 
 logging:
   level: INFO
+
+demo:
+  enabled: true

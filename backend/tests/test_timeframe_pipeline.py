@@ -4,8 +4,10 @@ from backend.core import EventBus
 from backend.models import Candle, Timeframe
 from backend.pipelines.candle import ONE_MINUTE_MS, CandleClosedEvent
 from backend.pipelines.timeframe import (
+    AGGREGATED_TIMEFRAMES,
     DAILY_MS,
     FOUR_HOUR_MS,
+    ONE_HOUR_MS,
     WEEKLY_MS,
     TimeframeAggregationError,
     TimeframeAggregator,
@@ -72,6 +74,35 @@ def test_four_hour_aggregation_preserves_ohlcv_and_wicks() -> None:
     assert candle.low == 90.0
     assert candle.close == 340.0
     assert candle.volume == sum(float(index + 1) for index in range(240))
+
+
+def test_one_hour_aggregation_supports_entry_timeframe() -> None:
+    """Covers expanded lower-timeframe aggregation support and TEST-001."""
+
+    aggregator = TimeframeAggregator(Timeframe.ONE_HOUR)
+
+    candle = feed_minutes(aggregator, start_ms=0, count=60)
+
+    assert candle.timeframe is Timeframe.ONE_HOUR
+    assert candle.open_time_ms == 0
+    assert candle.close_time_ms == ONE_HOUR_MS
+    assert timeframe_open_time_ms(ONE_HOUR_MS + 123_456, Timeframe.ONE_HOUR) == ONE_HOUR_MS
+    assert timeframe_close_time_ms(ONE_HOUR_MS, Timeframe.ONE_HOUR) == 2 * ONE_HOUR_MS
+
+
+def test_default_timeframe_pipeline_supports_required_derived_timeframes() -> None:
+    """Covers expanded timeframe pipeline defaults and TEST-001."""
+
+    assert AGGREGATED_TIMEFRAMES == (
+        Timeframe.FIVE_MINUTE,
+        Timeframe.FIFTEEN_MINUTE,
+        Timeframe.THIRTY_MINUTE,
+        Timeframe.ONE_HOUR,
+        Timeframe.TWO_HOUR,
+        Timeframe.FOUR_HOUR,
+        Timeframe.DAILY,
+        Timeframe.WEEKLY,
+    )
 
 
 def test_daily_aggregation_uses_utc_midnight_boundaries() -> None:

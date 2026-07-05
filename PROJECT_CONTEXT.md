@@ -54,7 +54,7 @@ TIP is organized around pipelines and engines:
 2. BTCUSDT is the first symbol.
 3. The system builds candles from trade stream data, not Binance chart overlays.
 4. One-minute candles are the authoritative base timeframe.
-5. 4H, Daily, and Weekly candles are derived from one-minute candles.
+5. Supported chart timeframes are 1W, 1D, 4H, 2H, 1H, 30M, 15M, 5M, and 1M; higher timeframes are derived from one-minute candles.
 6. Candle closure is time-driven and UTC aligned.
 7. Millisecond precision is used internally.
 8. In-memory and disk persistence are both supported for candles.

@@ -27,7 +27,7 @@ import type {
   TrendSnapshotDto,
 } from "../types";
 
-const TIMEFRAMES: Timeframe[] = ["1m", "4h", "1d", "1w"];
+const TIMEFRAMES: Timeframe[] = ["1w", "1d", "4h", "2h", "1h", "30m", "15m", "5m", "1m"];
 const DEFAULT_SYMBOL = "BTCUSDT";
 
 interface VisualizationData {

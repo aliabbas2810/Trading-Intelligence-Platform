@@ -20,11 +20,17 @@ def test_load_default_settings_validates_typed_config() -> None:
     assert settings.market_data.max_reconnect_attempts is None
     assert settings.candles.base_timeframe is Timeframe.ONE_MINUTE
     assert settings.candles.derived_timeframes == (
+        Timeframe.FIVE_MINUTE,
+        Timeframe.FIFTEEN_MINUTE,
+        Timeframe.THIRTY_MINUTE,
+        Timeframe.ONE_HOUR,
+        Timeframe.TWO_HOUR,
         Timeframe.FOUR_HOUR,
         Timeframe.DAILY,
         Timeframe.WEEKLY,
     )
     assert settings.storage.candle_path == Path("data/candles")
+    assert settings.demo.enabled
 
 
 def test_invalid_settings_raise_clear_error(tmp_path: Path) -> None:

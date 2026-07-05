@@ -51,6 +51,12 @@ class LoggingSettings(BaseModel):
     level: str
 
 
+class DemoSettings(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = True
+
+
 class PlatformSettings(BaseModel):
     """Typed configuration contract for CFG-001."""
 
@@ -61,6 +67,7 @@ class PlatformSettings(BaseModel):
     candles: CandleSettings
     storage: StorageSettings
     logging: LoggingSettings
+    demo: DemoSettings = Field(default_factory=DemoSettings)
 
 
 def load_settings(path: Path | None = None) -> PlatformSettings:

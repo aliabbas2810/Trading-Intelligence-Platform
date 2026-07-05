@@ -93,6 +93,8 @@ test("trend background and ribbon are controlled by backend trend data", () => {
 
 test("timeframe selector changes rendered backend data", () => {
   assert.match(appSource, /const TIMEFRAMES/);
+  assert.match(typeSource, /"1w" \| "1d" \| "4h" \| "2h" \| "1h" \| "30m" \| "15m" \| "5m" \| "1m"/);
+  assert.match(appSource, /\["1w", "1d", "4h", "2h", "1h", "30m", "15m", "5m", "1m"\]/);
   assert.match(appSource, /setTimeframe/);
   assert.match(appSource, /fetchCandles\(symbol, timeframe\)/);
   assert.match(appSource, /fetchMarketStructure\(symbol, timeframe\)/);

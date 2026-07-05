@@ -1,4 +1,4 @@
-export type Timeframe = "1m" | "4h" | "1d" | "1w";
+export type Timeframe = "1w" | "1d" | "4h" | "2h" | "1h" | "30m" | "15m" | "5m" | "1m";
 export type StructureLabel = "HH" | "HL" | "LH" | "LL";
 export type BosDirection = "bullish" | "bearish";
 export type TrendState = "bullish" | "bearish" | "transition";

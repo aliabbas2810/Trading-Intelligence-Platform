@@ -3,13 +3,28 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from backend.pipelines.candle import ONE_MINUTE_MS
 from backend.models.domain import Candle, Timeframe
+from backend.pipelines.candle import ONE_MINUTE_MS
 
 
+FIVE_MINUTE_MS = 5 * ONE_MINUTE_MS
+FIFTEEN_MINUTE_MS = 15 * ONE_MINUTE_MS
+THIRTY_MINUTE_MS = 30 * ONE_MINUTE_MS
+ONE_HOUR_MS = 60 * ONE_MINUTE_MS
+TWO_HOUR_MS = 2 * ONE_HOUR_MS
 FOUR_HOUR_MS = 4 * 60 * ONE_MINUTE_MS
 DAILY_MS = 24 * 60 * ONE_MINUTE_MS
 WEEKLY_MS = 7 * DAILY_MS
+AGGREGATED_TIMEFRAMES = (
+    Timeframe.FIVE_MINUTE,
+    Timeframe.FIFTEEN_MINUTE,
+    Timeframe.THIRTY_MINUTE,
+    Timeframe.ONE_HOUR,
+    Timeframe.TWO_HOUR,
+    Timeframe.FOUR_HOUR,
+    Timeframe.DAILY,
+    Timeframe.WEEKLY,
+)
 
 
 class TimeframeAggregationError(ValueError):
@@ -72,8 +87,8 @@ class TimeframeAggregator:
     """Aggregate completed 1m candles into one higher timeframe for FR-301 through FR-305."""
 
     def __init__(self, timeframe: Timeframe) -> None:
-        if timeframe not in {Timeframe.FOUR_HOUR, Timeframe.DAILY, Timeframe.WEEKLY}:
-            raise ValueError("TimeframeAggregator only supports 4H, daily, and weekly candles")
+        if timeframe not in AGGREGATED_TIMEFRAMES:
+            raise ValueError("TimeframeAggregator only supports configured higher timeframes")
 
         self._timeframe = timeframe
         self._current: _WorkingTimeframeCandle | None = None
@@ -137,14 +152,10 @@ def timeframe_open_time_ms(timestamp_ms: int, timeframe: Timeframe) -> int:
     if timestamp_ms < 0:
         raise ValueError("timestamp_ms must be non-negative")
 
-    if timeframe is Timeframe.FOUR_HOUR:
-        return timestamp_ms - (timestamp_ms % FOUR_HOUR_MS)
-    if timeframe is Timeframe.DAILY:
-        return timestamp_ms - (timestamp_ms % DAILY_MS)
     if timeframe is Timeframe.WEEKLY:
         return _weekly_open_time_ms(timestamp_ms)
-    if timeframe is Timeframe.ONE_MINUTE:
-        return timestamp_ms - (timestamp_ms % ONE_MINUTE_MS)
+    duration_ms = timeframe_duration_ms(timeframe)
+    return timestamp_ms - (timestamp_ms % duration_ms)
 
     raise ValueError(f"Unsupported timeframe: {timeframe}")
 
@@ -158,6 +169,16 @@ def timeframe_close_time_ms(open_time_ms: int, timeframe: Timeframe) -> int:
 def timeframe_duration_ms(timeframe: Timeframe) -> int:
     if timeframe is Timeframe.ONE_MINUTE:
         return ONE_MINUTE_MS
+    if timeframe is Timeframe.FIVE_MINUTE:
+        return FIVE_MINUTE_MS
+    if timeframe is Timeframe.FIFTEEN_MINUTE:
+        return FIFTEEN_MINUTE_MS
+    if timeframe is Timeframe.THIRTY_MINUTE:
+        return THIRTY_MINUTE_MS
+    if timeframe is Timeframe.ONE_HOUR:
+        return ONE_HOUR_MS
+    if timeframe is Timeframe.TWO_HOUR:
+        return TWO_HOUR_MS
     if timeframe is Timeframe.FOUR_HOUR:
         return FOUR_HOUR_MS
     if timeframe is Timeframe.DAILY:

@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from backend.api.service import create_app
 from backend.app import BackendRuntime, RuntimeMode, RuntimeState
 from backend.app.cli import main
+from backend.config import PlatformSettings, load_settings
 from backend.engines.structure import (
     BreakDirection,
     BreakOfStructure,
@@ -82,7 +83,7 @@ def test_health_endpoint_returns_runtime_status() -> None:
 def test_candles_endpoint_returns_stored_candles() -> None:
     """Covers FR-601 and TEST-001."""
 
-    runtime = BackendRuntime(mode=RuntimeMode.DRY_RUN)
+    runtime = BackendRuntime(settings=demo_disabled_settings(), mode=RuntimeMode.DRY_RUN)
     runtime.candle_store.save(make_candle())
 
     with TestClient(create_app(runtime)) as client:
@@ -107,7 +108,7 @@ def test_candles_endpoint_returns_stored_candles() -> None:
 def test_structure_trend_and_alignment_endpoints_use_read_boundaries() -> None:
     """Covers FR-602, FR-603, FR-604, FR-605, and TEST-001."""
 
-    runtime = BackendRuntime(mode=RuntimeMode.DRY_RUN)
+    runtime = BackendRuntime(settings=demo_disabled_settings(), mode=RuntimeMode.DRY_RUN)
     swing = StructureSwing(
         symbol="BTCUSDT",
         timeframe=Timeframe.FOUR_HOUR,
@@ -183,6 +184,40 @@ def test_structure_trend_and_alignment_endpoints_use_read_boundaries() -> None:
     assert alignment_response.json()["bias"] == "bullish"
 
 
+def test_dry_run_demo_mode_returns_non_empty_visualization_api_responses() -> None:
+    """Covers RUNTIME-005, FR-601 through FR-605, and TEST-001."""
+
+    runtime = BackendRuntime(mode=RuntimeMode.DRY_RUN)
+    timeframes = ("1w", "1d", "4h", "2h", "1h", "30m", "15m", "5m", "1m")
+
+    with TestClient(create_app(runtime)) as client:
+        responses = {
+            timeframe: (
+                client.get("/api/candles", params={"symbol": "BTCUSDT", "timeframe": timeframe}),
+                client.get(
+                    "/api/market-structure",
+                    params={"symbol": "BTCUSDT", "timeframe": timeframe},
+                ),
+                client.get("/api/trend-state", params={"symbol": "BTCUSDT", "timeframe": timeframe}),
+            )
+            for timeframe in timeframes
+        }
+        alignment_response = client.get("/api/multi-timeframe-alignment", params={"symbol": "BTCUSDT"})
+
+    for candles_response, structure_response, trend_response in responses.values():
+        assert candles_response.status_code == 200
+        assert structure_response.status_code == 200
+        assert trend_response.status_code == 200
+        assert len(candles_response.json()) > 0
+        assert {item["label"] for item in structure_response.json()["swings"]} == {"HH", "HL", "LH", "LL"}
+        assert len(structure_response.json()["breaks_of_structure"]) > 0
+        assert trend_response.json()["update"]["state"] == "bullish"
+
+    assert alignment_response.status_code == 200
+    assert alignment_response.json()["alignment_score"] == 3
+    assert alignment_response.json()["bias"] == "bullish"
+
+
 def test_startup_and_shutdown_call_runtime_lifecycle_without_network() -> None:
     """Covers RUNTIME-003 and TEST-001 without live Binance networking."""
 
@@ -234,3 +269,12 @@ def test_api_layer_does_not_recompute_analysis_logic() -> None:
 
 def assert_runtime_state(runtime: BackendRuntime, expected: RuntimeState) -> None:
     assert runtime.state is expected
+
+
+def demo_disabled_settings() -> PlatformSettings:
+    settings = load_settings()
+    return settings.model_copy(
+        update={
+            "demo": settings.demo.model_copy(update={"enabled": False}),
+        },
+    )

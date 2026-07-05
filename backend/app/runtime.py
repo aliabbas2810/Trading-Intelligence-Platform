@@ -38,6 +38,7 @@ from backend.pipelines.market_data import (
 )
 from backend.pipelines.timeframe import TimeframeCandleClosedEvent, TimeframePipeline
 from backend.storage import InMemoryCandleStore
+from backend.app.demo import seed_demo_visualization_data
 
 
 class RuntimeMode(str, Enum):
@@ -164,6 +165,7 @@ class BackendRuntime:
         self._trend_snapshots: dict[tuple[str, Timeframe], TimeframeTrendSnapshot] = {}
         self._state = RuntimeState.CREATED
         self._subscribed = False
+        self._demo_seeded = False
         self._logger = get_logger(__name__)
 
     @property
@@ -178,6 +180,7 @@ class BackendRuntime:
 
         configure_logging(self.settings)
         self._subscribe_components()
+        self._seed_demo_data_if_enabled()
         self._state = RuntimeState.RUNNING
         self._start_live_stream_if_enabled()
         self._logger.info("Backend runtime started")
@@ -222,6 +225,11 @@ class BackendRuntime:
             ComponentHealth("scanner", status, "scanner foundation ready"),
             ComponentHealth("ai_decision_engine", status, "mock provider ready"),
             ComponentHealth("visualization_api", status, "read-only API boundary ready"),
+            ComponentHealth(
+                "demo_data",
+                self._demo_component_status(),
+                self._demo_component_message(),
+            ),
         ]
         return RuntimeHealth(
             state=self._state,
@@ -248,6 +256,10 @@ class BackendRuntime:
     def stream_enabled(self) -> bool:
         return self.mode is RuntimeMode.LIVE_BINANCE and self.settings.market_data.live_enabled
 
+    @property
+    def demo_data_enabled(self) -> bool:
+        return self.mode is RuntimeMode.DRY_RUN and self.settings.demo.enabled
+
     def _build_binance_stream_client(self) -> BinanceTradeStreamClient:
         return BinanceTradeStreamClient(
             config=BinanceTradeStreamClientConfig(
@@ -266,6 +278,18 @@ class BackendRuntime:
         self._live_stream_runner = self._live_stream_runner_factory(self.binance_stream_client)
         self._live_stream_runner.start()
 
+    def _seed_demo_data_if_enabled(self) -> None:
+        if not self.demo_data_enabled or self._demo_seeded:
+            return
+        seed_demo_visualization_data(
+            symbol=self.active_symbol,
+            candle_store=self.candle_store,
+            structure_store=self.structure_store,
+            trend_store=self.trend_store,
+            alignment_store=self.alignment_store,
+        )
+        self._demo_seeded = True
+
     def _handle_market_data_status(self, event: MarketDataStatusEvent) -> None:
         self._stream_status = event.status
 
@@ -282,6 +306,22 @@ class BackendRuntime:
         if not self.settings.market_data.live_enabled:
             return "disabled by config"
         return f"{self.settings.market_data.exchange}:{self.active_symbol}"
+
+    def _demo_component_status(self) -> ComponentStatus:
+        if not self.demo_data_enabled:
+            return ComponentStatus.DISABLED
+        if self._demo_seeded:
+            return ComponentStatus.READY
+        return ComponentStatus.READY
+
+    def _demo_component_message(self) -> str:
+        if self.mode is not RuntimeMode.DRY_RUN:
+            return "disabled outside dry-run mode"
+        if not self.settings.demo.enabled:
+            return "disabled by config"
+        if self._demo_seeded:
+            return f"seeded deterministic visualization data for {self.active_symbol}"
+        return "ready to seed deterministic visualization data"
 
     def _handle_candle_closed(self, event: CandleClosedEvent) -> None:
         self._handle_completed_candle(event.candle)

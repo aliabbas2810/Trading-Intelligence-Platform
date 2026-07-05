@@ -67,7 +67,7 @@ Engines analyze and enrich data:
 - Replay Engine
 - Future AI Decision Engine
 
-The first supported symbol shall be BTCUSDT. The architecture shall support future multi-symbol scanning.
+The first supported symbol shall be BTCUSDT. The supported visualization timeframes shall be 1W, 1D, 4H, 2H, 1H, 30M, 15M, 5M, and 1M. The architecture shall support future multi-symbol scanning.
 
 ---
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from backend.core import EventBus, get_logger
 from backend.models.domain import Candle, Timeframe
 from backend.pipelines.candle import CandleClosedEvent
-from backend.pipelines.timeframe.aggregation import TimeframeAggregator
+from backend.pipelines.timeframe.aggregation import AGGREGATED_TIMEFRAMES, TimeframeAggregator
 from backend.pipelines.timeframe.events import TimeframeCandleClosedEvent
 from backend.storage import CandleStore
 
@@ -15,11 +15,7 @@ class TimeframePipeline:
         self,
         event_bus: EventBus,
         store: CandleStore,
-        timeframes: tuple[Timeframe, ...] = (
-            Timeframe.FOUR_HOUR,
-            Timeframe.DAILY,
-            Timeframe.WEEKLY,
-        ),
+        timeframes: tuple[Timeframe, ...] = AGGREGATED_TIMEFRAMES,
     ) -> None:
         self._event_bus = event_bus
         self._store = store
