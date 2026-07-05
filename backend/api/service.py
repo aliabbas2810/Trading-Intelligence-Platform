@@ -7,6 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 
+from backend.api.replay import ReplayStartRequest, ReplayStatusResponse
 from backend.app.runtime import BackendRuntime, RuntimeState
 from backend.models import Timeframe
 
@@ -43,7 +44,7 @@ def create_app(runtime: BackendRuntime | None = None) -> FastAPI:
         CORSMiddleware,
         allow_origins=list(LOCAL_FRONTEND_ORIGINS),
         allow_credentials=False,
-        allow_methods=["GET"],
+        allow_methods=["GET", "POST"],
         allow_headers=["*"],
     )
 
@@ -86,6 +87,47 @@ def create_app(runtime: BackendRuntime | None = None) -> FastAPI:
 
         api = runtime_from_request(request).visualization_api
         return jsonable_encoder(api.get_multi_timeframe_alignment(symbol))
+
+    @app.post("/api/replay/start")
+    def replay_start(request: Request, payload: ReplayStartRequest | None = None) -> object:
+        """Start demo replay through the runtime for FR-801 and FR-802."""
+
+        replay_request = payload or ReplayStartRequest()
+        snapshot = runtime_from_request(request).start_replay(
+            source_type=replay_request.source_type,
+            speed_multiplier=replay_request.speed_multiplier,
+        )
+        return ReplayStatusResponse.from_snapshot(snapshot)
+
+    @app.post("/api/replay/pause")
+    def replay_pause(request: Request) -> object:
+        """Pause replay for FR-803."""
+
+        return ReplayStatusResponse.from_snapshot(runtime_from_request(request).pause_replay())
+
+    @app.post("/api/replay/resume")
+    def replay_resume(request: Request) -> object:
+        """Resume replay for FR-804."""
+
+        return ReplayStatusResponse.from_snapshot(runtime_from_request(request).resume_replay())
+
+    @app.post("/api/replay/stop")
+    def replay_stop(request: Request) -> object:
+        """Stop replay for FR-801."""
+
+        return ReplayStatusResponse.from_snapshot(runtime_from_request(request).stop_replay())
+
+    @app.post("/api/replay/step")
+    def replay_step(request: Request) -> object:
+        """Publish one replay event through the runtime for FR-805 and FR-806."""
+
+        return ReplayStatusResponse.from_snapshot(runtime_from_request(request).step_replay())
+
+    @app.get("/api/replay/status")
+    def replay_status(request: Request) -> object:
+        """Return replay status/progress for RUNTIME-004."""
+
+        return ReplayStatusResponse.from_snapshot(runtime_from_request(request).replay_status())
 
     return app
 

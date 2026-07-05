@@ -231,6 +231,70 @@ def test_startup_and_shutdown_call_runtime_lifecycle_without_network() -> None:
     assert_runtime_state(runtime, RuntimeState.STOPPED)
 
 
+def test_replay_api_start_pause_resume_step_stop_and_status() -> None:
+    """Covers FR-801 through FR-805, RUNTIME-004, and TEST-001."""
+
+    runtime = BackendRuntime(mode=RuntimeMode.DRY_RUN)
+
+    with TestClient(create_app(runtime)) as client:
+        status_response = client.get("/api/replay/status")
+        start_response = client.post(
+            "/api/replay/start",
+            json={"source_type": "trades", "speed_multiplier": 2.0},
+        )
+        pause_response = client.post("/api/replay/pause")
+        resume_response = client.post("/api/replay/resume")
+        step_response = client.post("/api/replay/step")
+        stop_response = client.post("/api/replay/stop")
+
+    assert status_response.status_code == 200
+    assert status_response.json()["status"] == "ready"
+    assert start_response.status_code == 200
+    assert start_response.json()["source_type"] == "trades"
+    assert start_response.json()["speed_multiplier"] == 2.0
+    assert start_response.json()["processed_events"] == 1
+    assert pause_response.status_code == 200
+    assert pause_response.json()["paused"]
+    assert resume_response.status_code == 200
+    assert resume_response.json()["processed_events"] == 2
+    assert step_response.status_code == 200
+    assert step_response.json()["status"] == "completed"
+    assert stop_response.status_code == 200
+    assert stop_response.json()["stopped"]
+
+
+def test_replay_api_supports_demo_candle_source() -> None:
+    """Covers FR-801 candle replay source controls and TEST-001."""
+
+    runtime = BackendRuntime(mode=RuntimeMode.DRY_RUN)
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post("/api/replay/start", json={"source_type": "candles"})
+
+    assert response.status_code == 200
+    assert response.json()["source_type"] == "candles"
+    assert response.json()["total_events"] == 3
+
+
+def test_replay_trade_events_reach_existing_candle_pipeline() -> None:
+    """Covers FR-806: replay reuses the live downstream event path."""
+
+    runtime = BackendRuntime(mode=RuntimeMode.DRY_RUN)
+
+    with TestClient(create_app(runtime)) as client:
+        client.post("/api/replay/start", json={"source_type": "trades"})
+        client.post("/api/replay/step")
+
+    replay_candles = tuple(
+        candle
+        for candle in runtime.candle_store.list("BTCUSDT", Timeframe.ONE_MINUTE)
+        if 1_999_999_980_000 <= candle.open_time_ms < 2_000_000_060_000
+    )
+    assert len(replay_candles) == 1
+    assert replay_candles[0].open == 50_000.0
+    assert replay_candles[0].close == 50_000.0
+
+
 def test_cli_can_run_api_mode_without_starting_server(monkeypatch: pytest.MonkeyPatch) -> None:
     """Covers local API CLI wiring for RUNTIME-001 and TEST-001."""
 
@@ -262,6 +326,8 @@ def test_api_layer_does_not_recompute_analysis_logic() -> None:
         ".add_candle(",
         ".add_event(",
         "score_candidate",
+        "body_high",
+        "body_low",
     )
     for fragment in forbidden_fragments:
         assert fragment not in source

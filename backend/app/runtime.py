@@ -39,6 +39,7 @@ from backend.pipelines.market_data import (
 from backend.pipelines.timeframe import TimeframeCandleClosedEvent, TimeframePipeline
 from backend.storage import InMemoryCandleStore
 from backend.app.demo import seed_demo_visualization_data
+from backend.app.replay_runtime import ReplaySourceType, ReplayStatusSnapshot, RuntimeReplayService
 
 
 class RuntimeMode(str, Enum):
@@ -159,6 +160,7 @@ class BackendRuntime:
             self.event_bus,
             HistoricalTradeReplaySource(()),
         )
+        self.replay_service = RuntimeReplayService(self.event_bus, symbol=self.active_symbol)
         self.multi_timeframe_aggregator = MultiTimeframeTrendAggregator()
         self._structure_engines: dict[tuple[str, Timeframe], MarketStructureEngine] = {}
         self._trend_engines: dict[tuple[str, Timeframe], TrendEngine] = {}
@@ -221,7 +223,7 @@ class BackendRuntime:
             ComponentHealth("structure_engine", status, "created lazily per symbol/timeframe"),
             ComponentHealth("trend_engine", status, "created lazily per symbol/timeframe"),
             ComponentHealth("multi_timeframe_aggregator", status, "aggregates trend snapshots"),
-            ComponentHealth("replay_engine", status, "empty replay controller ready"),
+            ComponentHealth("replay_engine", status, self._replay_component_message()),
             ComponentHealth("scanner", status, "scanner foundation ready"),
             ComponentHealth("ai_decision_engine", status, "mock provider ready"),
             ComponentHealth("visualization_api", status, "read-only API boundary ready"),
@@ -236,6 +238,41 @@ class BackendRuntime:
             mode=self.mode,
             components=tuple(components),
         )
+
+    def start_replay(
+        self,
+        *,
+        source_type: ReplaySourceType,
+        speed_multiplier: float = 1.0,
+    ) -> ReplayStatusSnapshot:
+        """Start replay controls through the runtime for FR-801 and FR-802."""
+
+        return self.replay_service.start(source_type=source_type, speed_multiplier=speed_multiplier)
+
+    def pause_replay(self) -> ReplayStatusSnapshot:
+        """Pause runtime replay for FR-803."""
+
+        return self.replay_service.pause()
+
+    def resume_replay(self) -> ReplayStatusSnapshot:
+        """Resume runtime replay for FR-804."""
+
+        return self.replay_service.resume()
+
+    def stop_replay(self) -> ReplayStatusSnapshot:
+        """Stop runtime replay for FR-801."""
+
+        return self.replay_service.stop()
+
+    def step_replay(self) -> ReplayStatusSnapshot:
+        """Step runtime replay for FR-805."""
+
+        return self.replay_service.step()
+
+    def replay_status(self) -> ReplayStatusSnapshot:
+        """Return replay progress/status for RUNTIME-004."""
+
+        return self.replay_service.status()
 
     def _subscribe_components(self) -> None:
         if self._subscribed:
@@ -322,6 +359,14 @@ class BackendRuntime:
         if self._demo_seeded:
             return f"seeded deterministic visualization data for {self.active_symbol}"
         return "ready to seed deterministic visualization data"
+
+    def _replay_component_message(self) -> str:
+        replay_status = self.replay_status()
+        return (
+            f"{replay_status.status.value} "
+            f"{replay_status.processed_events}/{replay_status.total_events} "
+            f"source={replay_status.source_type.value if replay_status.source_type else 'none'}"
+        )
 
     def _handle_candle_closed(self, event: CandleClosedEvent) -> None:
         self._handle_completed_candle(event.candle)
