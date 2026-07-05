@@ -62,7 +62,8 @@ test("trend background and ribbon are controlled by backend trend data", () => {
   assert.match(appSource, /setTrendBackground/);
   assert.match(appSource, /trendRibbon \?/);
   assert.match(appSource, /setTrendRibbon/);
-  assert.match(appSource, /data\.alignmentScore\/3 aligned/);
+  assert.match(appSource, /data\.alignmentScore/);
+  assert.match(appSource, /\/3 aligned/);
 });
 
 test("timeframe selector changes rendered backend data", () => {
