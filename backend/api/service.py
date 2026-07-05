@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.app import BackendRuntime, RuntimeState
+from backend.app.runtime import BackendRuntime, RuntimeState
 from backend.models import Timeframe
 
 

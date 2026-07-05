@@ -64,3 +64,9 @@ export interface MultiTimeframeAlignmentDto {
   alignment_score: number;
   reason: string;
 }
+
+export interface HealthStatusDto {
+  state: string;
+  mode: string;
+  components: Record<string, string>;
+}

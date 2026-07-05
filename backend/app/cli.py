@@ -5,7 +5,7 @@ import json
 import time
 
 from backend.app.runtime import BackendRuntime, RuntimeMode
-from backend.api import create_app
+from backend.api.service import create_app
 
 
 def main(argv: list[str] | None = None) -> int:

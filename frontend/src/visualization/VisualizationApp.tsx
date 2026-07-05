@@ -1,22 +1,27 @@
-import { BarChart3, Eye, EyeOff, Layers, Ribbon, ToggleLeft } from "lucide-react";
+import { BarChart3, Eye, EyeOff, Layers, RefreshCw, Ribbon, ToggleLeft } from "lucide-react";
 import {
+  CandlestickSeries,
   createChart,
   type CandlestickData,
   type IChartApi,
   type ISeriesApi,
   type Time,
 } from "lightweight-charts";
+import React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchCandles,
+  fetchHealthStatus,
   fetchMarketStructure,
   fetchMultiTimeframeAlignment,
   fetchTrendState,
 } from "../api";
+import { POLL_INTERVAL_MS } from "../config";
 import type {
   BosMode,
   BreakOfStructureDto,
   CandleDto,
+  HealthStatusDto,
   StructureSnapshotDto,
   Timeframe,
   TrendSnapshotDto,
@@ -30,6 +35,7 @@ interface VisualizationData {
   structure: StructureSnapshotDto;
   trend: TrendSnapshotDto;
   alignmentScore: number;
+  health: HealthStatusDto | null;
 }
 
 export function VisualizationApp() {
@@ -39,37 +45,65 @@ export function VisualizationApp() {
   const [bosMode, setBosMode] = useState<BosMode>("permanent");
   const [trendBackground, setTrendBackground] = useState(true);
   const [trendRibbon, setTrendRibbon] = useState(true);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [data, setData] = useState<VisualizationData>({
     candles: [],
     structure: { swings: [], breaks_of_structure: [] },
     trend: { update: null },
     alignmentScore: 0,
+    health: null,
   });
 
   useEffect(() => {
     let active = true;
     async function load() {
-      const [candles, structure, trend, alignment] = await Promise.all([
-        fetchCandles(symbol, timeframe),
-        fetchMarketStructure(symbol, timeframe),
-        fetchTrendState(symbol, timeframe),
-        fetchMultiTimeframeAlignment(symbol),
-      ]);
-      if (!active) {
-        return;
+      setLoading(true);
+      setErrorMessage(null);
+      try {
+        const [candles, structure, trend, alignment, health] = await Promise.all([
+          fetchCandles(symbol, timeframe),
+          fetchMarketStructure(symbol, timeframe),
+          fetchTrendState(symbol, timeframe),
+          fetchMultiTimeframeAlignment(symbol),
+          fetchHealthStatus(),
+        ]);
+        if (!active) {
+          return;
+        }
+        setData({
+          candles,
+          structure,
+          trend,
+          alignmentScore: alignment?.alignment_score ?? 0,
+          health,
+        });
+      } catch (error) {
+        if (active) {
+          setErrorMessage(error instanceof Error ? error.message : "Unable to load backend data");
+        }
+      } finally {
+        if (active) {
+          setLoading(false);
+        }
       }
-      setData({
-        candles,
-        structure,
-        trend,
-        alignmentScore: alignment?.alignment_score ?? 0,
-      });
     }
     void load();
     return () => {
       active = false;
     };
-  }, [symbol, timeframe]);
+  }, [symbol, timeframe, refreshKey]);
+
+  useEffect(() => {
+    if (POLL_INTERVAL_MS <= 0) {
+      return;
+    }
+    const interval = window.setInterval(() => {
+      setRefreshKey((value) => value + 1);
+    }, POLL_INTERVAL_MS);
+    return () => window.clearInterval(interval);
+  }, []);
 
   const trendState = data.trend.update?.state ?? "transition";
   const visibleBos = useMemo(
@@ -123,7 +157,16 @@ export function VisualizationApp() {
             <Ribbon size={16} />
             Ribbon
           </button>
+          <button type="button" onClick={() => setRefreshKey((value) => value + 1)} title="Refresh backend data">
+            <RefreshCw size={16} />
+            Refresh
+          </button>
         </div>
+      </section>
+      <section className="status-strip" aria-live="polite">
+        <span>{loading ? "Loading backend data" : "Backend data loaded"}</span>
+        <span>{data.health?.state ?? "status unknown"}</span>
+        {errorMessage ? <strong role="alert">API error: {errorMessage}</strong> : null}
       </section>
       {trendRibbon ? (
         <section className={`trend-ribbon state-${trendState}`}>
@@ -153,34 +196,44 @@ function ChartCanvas({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const [chartError, setChartError] = useState<string | null>(null);
 
   useEffect(() => {
     if (containerRef.current === null) {
       return;
     }
-    const chart = createChart(containerRef.current, {
-      autoSize: true,
-      layout: {
-        background: { color: "#0f172a" },
-        textColor: "#d8dee9",
-      },
-      grid: {
-        vertLines: { color: "#1f2937" },
-        horzLines: { color: "#1f2937" },
-      },
-      rightPriceScale: { borderColor: "#334155" },
-      timeScale: { borderColor: "#334155" },
-    });
-    const candlesSeries = chart.addCandlestickSeries({
-      upColor: "#2fbf71",
-      downColor: "#ef4444",
-      borderVisible: false,
-      wickUpColor: "#2fbf71",
-      wickDownColor: "#ef4444",
-    });
-    chartRef.current = chart;
-    candleSeriesRef.current = candlesSeries;
-    return () => chart.remove();
+    let chart: IChartApi | null = null;
+    try {
+      chart = createChart(containerRef.current, {
+        autoSize: true,
+        layout: {
+          background: { color: "#0f172a" },
+          textColor: "#d8dee9",
+        },
+        grid: {
+          vertLines: { color: "#1f2937" },
+          horzLines: { color: "#1f2937" },
+        },
+        rightPriceScale: { borderColor: "#334155" },
+        timeScale: { borderColor: "#334155" },
+      });
+      const candlesSeries = chart.addSeries(CandlestickSeries, {
+        upColor: "#2fbf71",
+        downColor: "#ef4444",
+        borderVisible: false,
+        wickUpColor: "#2fbf71",
+        wickDownColor: "#ef4444",
+      });
+      chartRef.current = chart;
+      candleSeriesRef.current = candlesSeries;
+      setChartError(null);
+    } catch (error) {
+      chart?.remove();
+      chartRef.current = null;
+      candleSeriesRef.current = null;
+      setChartError(error instanceof Error ? error.message : "Unable to initialize chart");
+    }
+    return () => chart?.remove();
   }, []);
 
   useEffect(() => {
@@ -213,7 +266,12 @@ function ChartCanvas({
     chartRef.current?.timeScale().fitContent();
   }, [candles, structure, bos]);
 
-  return <section ref={containerRef} className="chart-surface" />;
+  return (
+    <section className="chart-frame">
+      {chartError ? <div className="chart-error" role="alert">Chart error: {chartError}</div> : null}
+      <div ref={containerRef} className="chart-surface" />
+    </section>
+  );
 }
 
 function toChartCandle(candle: CandleDto): CandlestickData<Time> {

@@ -88,6 +88,28 @@ The root npm test script delegates to the frontend workspace:
 npm --prefix frontend test
 ```
 
+## Running Locally
+
+Start the backend API in dry-run mode:
+
+```powershell
+py -3.12 -m backend.app --api --dry-run --host 127.0.0.1 --port 8000
+```
+
+Start the frontend development server in another terminal:
+
+```powershell
+npm --prefix frontend run dev -- --host 127.0.0.1 --port 5173
+```
+
+The frontend defaults to `http://127.0.0.1:8000` for API calls. Override it with:
+
+```powershell
+$env:VITE_TIP_API_BASE_URL="http://127.0.0.1:8000"
+$env:VITE_TIP_POLL_INTERVAL_MS="5000"
+npm --prefix frontend run dev -- --host 127.0.0.1 --port 5173
+```
+
 ## Milestone Status
 
 | Milestone | Status | Goal |

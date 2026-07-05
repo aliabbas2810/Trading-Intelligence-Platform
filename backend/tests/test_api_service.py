@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.api import create_app
+from backend.api.service import create_app
 from backend.app import BackendRuntime, RuntimeMode, RuntimeState
 from backend.app.cli import main
 from backend.engines.structure import (

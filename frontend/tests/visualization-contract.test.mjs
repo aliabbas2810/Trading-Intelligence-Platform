@@ -6,20 +6,33 @@ import test from "node:test";
 const root = process.cwd();
 const appSource = readFileSync(join(root, "src", "visualization", "VisualizationApp.tsx"), "utf8");
 const apiSource = readFileSync(join(root, "src", "api.ts"), "utf8");
+const configSource = readFileSync(join(root, "src", "config.ts"), "utf8");
 const typeSource = readFileSync(join(root, "src", "types.ts"), "utf8");
 
 test("visualization uses Lightweight Charts and renders backend overlays", () => {
   assert.match(appSource, /from "lightweight-charts"/);
+  assert.match(appSource, /CandlestickSeries/);
   assert.match(appSource, /createChart/);
-  assert.match(appSource, /addCandlestickSeries/);
+  assert.match(appSource, /addSeries\(CandlestickSeries/);
   assert.match(appSource, /createPriceLine/);
 });
 
 test("frontend fetches backend read endpoints", () => {
+  assert.match(apiSource, /API_BASE_URL/);
   assert.match(apiSource, /\/candles/);
   assert.match(apiSource, /\/market-structure/);
   assert.match(apiSource, /\/trend-state/);
   assert.match(apiSource, /\/multi-timeframe-alignment/);
+  assert.match(apiSource, /\/health/);
+  assert.match(apiSource, /URLSearchParams/);
+});
+
+test("frontend API base URL and polling are configurable", () => {
+  assert.match(configSource, /DEFAULT_API_BASE_URL = "http:\/\/127\.0\.0\.1:8000"/);
+  assert.match(configSource, /VITE_TIP_API_BASE_URL/);
+  assert.match(configSource, /VITE_TIP_POLL_INTERVAL_MS/);
+  assert.match(appSource, /POLL_INTERVAL_MS/);
+  assert.match(appSource, /setInterval/);
 });
 
 test("frontend does not calculate structure or trend labels", () => {
@@ -34,6 +47,18 @@ test("visualization controls required by M7 are present", () => {
   assert.match(appSource, /BOS mode/);
   assert.match(appSource, /Toggle trend background/);
   assert.match(appSource, /Toggle trend ribbon/);
+  assert.match(appSource, /Refresh backend data/);
+});
+
+test("visualization exposes loading and API error states", () => {
+  assert.match(appSource, /loading/);
+  assert.match(appSource, /Loading backend data/);
+  assert.match(appSource, /Backend data loaded/);
+  assert.match(appSource, /errorMessage/);
+  assert.match(appSource, /role="alert"/);
+  assert.match(appSource, /API error:/);
+  assert.match(appSource, /chartError/);
+  assert.match(appSource, /Chart error:/);
 });
 
 test("structure overlays include HH, HL, LH, and LL horizontal labeled lines", () => {
@@ -71,5 +96,5 @@ test("timeframe selector changes rendered backend data", () => {
   assert.match(appSource, /setTimeframe/);
   assert.match(appSource, /fetchCandles\(symbol, timeframe\)/);
   assert.match(appSource, /fetchMarketStructure\(symbol, timeframe\)/);
-  assert.match(appSource, /\[symbol, timeframe\]/);
+  assert.match(appSource, /\[symbol, timeframe, refreshKey\]/);
 });
