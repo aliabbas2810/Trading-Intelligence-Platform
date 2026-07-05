@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,9 @@ from backend.app import (
     RuntimeState,
 )
 from backend.app.cli import main
+from backend.config import PlatformSettings, load_settings
 from backend.models import Timeframe, Trade
+from backend.pipelines.market_data import BinanceTradeStreamClient
 
 
 def make_trade(timestamp_ms: int, price: float) -> Trade:
@@ -80,6 +83,98 @@ def test_dry_run_mode_does_not_require_binance_network_access() -> None:
     assert runtime.market_data_pipeline is not None
 
 
+def test_live_binance_mode_starts_stream_client() -> None:
+    """Covers FR-101, RUNTIME-002, RUNTIME-003, and TEST-001."""
+
+    runner = RecordingLiveStreamRunner()
+    runtime = BackendRuntime(
+        settings=live_enabled_settings(),
+        mode=RuntimeMode.LIVE_BINANCE,
+        live_stream_runner_factory=lambda client: runner.bind(client),
+    )
+
+    runtime.start()
+
+    assert runner.started
+    assert runner.client is runtime.binance_stream_client
+
+
+def test_live_binance_mode_stops_stream_client() -> None:
+    """Covers FR-102 lifecycle stop handling and RUNTIME-003."""
+
+    runner = RecordingLiveStreamRunner()
+    runtime = BackendRuntime(
+        settings=live_enabled_settings(),
+        mode=RuntimeMode.LIVE_BINANCE,
+        live_stream_runner_factory=lambda client: runner.bind(client),
+    )
+    runtime.start()
+
+    runtime.stop()
+
+    assert runner.stopped
+
+
+def test_live_binance_trade_event_reaches_candle_pipeline() -> None:
+    """Covers FR-109 and RUNTIME-002 without real Binance network calls."""
+
+    trade_payload = json.dumps(
+        {
+            "e": "trade",
+            "s": "BTCUSDT",
+            "p": "100.0",
+            "q": "1.0",
+            "T": 1_000,
+        },
+    )
+    runner = RecordingLiveStreamRunner(messages=(trade_payload,))
+    runtime = BackendRuntime(
+        settings=live_enabled_settings(),
+        mode=RuntimeMode.LIVE_BINANCE,
+        live_stream_runner_factory=lambda client: runner.bind(client),
+    )
+
+    runtime.start()
+    assert runner.client is not None
+    runner.client.handle_message(
+        json.dumps(
+            {
+                "e": "trade",
+                "s": "BTCUSDT",
+                "p": "101.0",
+                "q": "1.0",
+                "T": 61_000,
+            },
+        ),
+    )
+
+    candles = runtime.visualization_api.get_candles("BTCUSDT", Timeframe.ONE_MINUTE)
+    assert len(candles) == 1
+    assert candles[0].open == 100.0
+    assert candles[0].close == 100.0
+
+
+def test_live_binance_health_reports_stream_fields() -> None:
+    """Covers RUNTIME-004 live market data health fields."""
+
+    runner = RecordingLiveStreamRunner()
+    runtime = BackendRuntime(
+        settings=live_enabled_settings(symbol="ETHUSDT"),
+        mode=RuntimeMode.LIVE_BINANCE,
+        live_stream_runner_factory=lambda client: runner.bind(client),
+    )
+
+    runtime.start()
+    components = {component.name: component for component in runtime.health().components}
+
+    assert runtime.health().mode is RuntimeMode.LIVE_BINANCE
+    assert components["market_data_mode"].message == "live_binance"
+    assert components["stream_enabled"].message == "True"
+    assert components["stream_status"].message == "stopped"
+    assert components["active_symbol"].message == "ETHUSDT"
+    assert components["binance_stream_client"].status is ComponentStatus.RUNNING
+
+
 def test_runtime_wires_trade_events_into_existing_candle_pipeline() -> None:
     """Covers RUNTIME-002 integration wiring without duplicating candle logic."""
 
@@ -123,3 +218,41 @@ def test_runtime_does_not_duplicate_business_logic() -> None:
     )
     for fragment in forbidden_fragments:
         assert fragment not in runtime_source
+
+
+class RecordingLiveStreamRunner:
+    def __init__(self, messages: tuple[str, ...] = ()) -> None:
+        self.messages = messages
+        self.client: BinanceTradeStreamClient | None = None
+        self.started = False
+        self.stopped = False
+
+    def bind(self, client: BinanceTradeStreamClient) -> RecordingLiveStreamRunner:
+        self.client = client
+        return self
+
+    def start(self) -> None:
+        self.started = True
+        if self.client is None:
+            raise RuntimeError("Missing Binance client")
+        for message in self.messages:
+            self.client.handle_message(message)
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+def live_enabled_settings(symbol: str = "BTCUSDT") -> PlatformSettings:
+    settings = load_settings()
+    return settings.model_copy(
+        update={
+            "market_data": settings.market_data.model_copy(
+                update={
+                    "symbols": (symbol,),
+                    "live_enabled": True,
+                    "reconnect_delay_seconds": 0.1,
+                    "max_reconnect_attempts": 3,
+                },
+            ),
+        },
+    )

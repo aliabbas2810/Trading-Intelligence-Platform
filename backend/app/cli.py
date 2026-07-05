@@ -8,14 +8,17 @@ from backend.app.runtime import BackendRuntime, RuntimeMode
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entrypoint for local dry-run startup under RUNTIME-001 and RUNTIME-005."""
+    """CLI entrypoint for local runtime startup under RUNTIME-001 and RUNTIME-005."""
 
     parser = argparse.ArgumentParser(description="Start the TIP backend runtime")
-    parser.add_argument("--dry-run", action="store_true", help="start without live Binance streaming")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--dry-run", action="store_true", help="start without live Binance streaming")
+    mode_group.add_argument("--live-binance", action="store_true", help="start Binance live stream when config enables it")
     parser.add_argument("--once", action="store_true", help="print health and stop immediately")
     args = parser.parse_args(argv)
 
-    runtime = BackendRuntime(mode=RuntimeMode.DRY_RUN)
+    mode = RuntimeMode.LIVE_BINANCE if args.live_binance else RuntimeMode.DRY_RUN
+    runtime = BackendRuntime(mode=mode)
     runtime.start()
     health = runtime.health()
     print(

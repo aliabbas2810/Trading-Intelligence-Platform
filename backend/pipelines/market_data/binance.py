@@ -183,7 +183,7 @@ class BinanceTradeStreamClient:
                     async for raw_message in websocket:
                         if self._stop_requested:
                             break
-                        self._handle_message(raw_message)
+                        self.handle_message(raw_message)
             except Exception as exc:
                 self._logger.exception("Binance trade stream error")
                 self._publish_status(
@@ -203,7 +203,9 @@ class BinanceTradeStreamClient:
 
         self._publish_status(MarketDataConnectionStatus.STOPPED, "stopped", attempt)
 
-    def _handle_message(self, raw_message: object) -> None:
+    def handle_message(self, raw_message: object) -> None:
+        """Parse and publish one raw stream message for FR-109."""
+
         try:
             trade = self._parser.parse(raw_message)
         except BinanceTradeMessageError:

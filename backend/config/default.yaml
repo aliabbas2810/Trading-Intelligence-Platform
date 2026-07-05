@@ -7,6 +7,9 @@ market_data:
   symbols:
     - BTCUSDT
   source: trade_stream
+  live_enabled: false
+  reconnect_delay_seconds: 1.0
+  max_reconnect_attempts:
 
 candles:
   base_timeframe: 1m

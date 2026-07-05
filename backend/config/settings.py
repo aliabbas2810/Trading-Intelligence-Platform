@@ -25,6 +25,9 @@ class MarketDataSettings(BaseModel):
     exchange: str
     symbols: tuple[str, ...] = Field(min_length=1)
     source: str
+    live_enabled: bool = False
+    reconnect_delay_seconds: float = Field(default=1.0, gt=0)
+    max_reconnect_attempts: int | None = Field(default=None, ge=1)
 
 
 class CandleSettings(BaseModel):

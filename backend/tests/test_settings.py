@@ -15,6 +15,9 @@ def test_load_default_settings_validates_typed_config() -> None:
 
     assert settings.app.name == "trading-intelligence-platform"
     assert settings.market_data.symbols == ("BTCUSDT",)
+    assert not settings.market_data.live_enabled
+    assert settings.market_data.reconnect_delay_seconds == 1.0
+    assert settings.market_data.max_reconnect_attempts is None
     assert settings.candles.base_timeframe is Timeframe.ONE_MINUTE
     assert settings.candles.derived_timeframes == (
         Timeframe.FOUR_HOUR,
