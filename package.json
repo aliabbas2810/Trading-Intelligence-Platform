@@ -1,0 +1,11 @@
+{
+  "name": "trading-intelligence-platform-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "frontend"
+  ],
+  "scripts": {
+    "test": "npm --prefix frontend test"
+  }
+}
