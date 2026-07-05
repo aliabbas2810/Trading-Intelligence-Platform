@@ -68,3 +68,26 @@ Verification: covered by backend pytest, ruff, and mypy.
 - No order execution is implemented.
 - No all-symbol live Binance streaming is implemented.
 - Frontend remains a visualization foundation and does not calculate structure or trend logic.
+
+## Phase 2 - v0.2.0 Runtime Assembly
+
+### Planned M11 - Local Backend Runtime
+
+Goal: assemble existing M1-M10 components into a runnable local backend application.
+
+Planned scope:
+
+- `RUNTIME-001`: application orchestrator.
+- `RUNTIME-002`: component wiring using existing config, logging, event bus, storage, pipelines, engines, replay, scanner, AI, and read API boundaries.
+- `RUNTIME-003`: start/stop lifecycle.
+- `RUNTIME-004`: health/status reporting.
+- `RUNTIME-005`: dry-run or replay-friendly local mode.
+
+Constraints:
+
+- Do not add new trading logic.
+- Do not expand Binance live networking beyond existing foundations.
+- Do not add real LLM integration.
+- Do not add order execution.
+
+Verification target: backend tests, lint, typecheck, and focused runtime assembly integration tests.

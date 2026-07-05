@@ -84,6 +84,7 @@ Requirement IDs use the following prefixes:
 | LOG | Logging Requirement |
 | ERR | Error Handling Requirement |
 | CFG | Configuration Requirement |
+| RUNTIME | Runtime Assembly Requirement |
 | DEP | Deployment Requirement |
 | TEST | Testing Requirement |
 | AI | Artificial Intelligence Requirement |
@@ -550,7 +551,53 @@ The repository shall contain enough context for Codex or another developer to co
 
 ---
 
-## 11. Testing Requirements
+## 11. Runtime Assembly Requirements
+
+### RUNTIME-001 — Application Orchestrator
+
+Priority: Mandatory
+
+The platform shall provide a local backend application orchestrator that assembles existing components into a runnable process.
+
+Milestone: M11
+
+### RUNTIME-002 — Component Wiring
+
+Priority: Mandatory
+
+The orchestrator shall use existing configuration, logging, event bus, storage, pipelines, engines, replay components, scanner components, AI decision components, and read API boundaries where applicable.
+
+Milestone: M11
+
+### RUNTIME-003 — Lifecycle Management
+
+Priority: Mandatory
+
+The local backend application shall expose a clean lifecycle with start and stop operations.
+
+Milestone: M11
+
+### RUNTIME-004 — Health and Status Reporting
+
+Priority: High
+
+The local backend application shall expose health/status information for assembled components.
+
+Milestone: M11
+
+### RUNTIME-005 — Dry-Run or Replay-Friendly Local Mode
+
+Priority: High
+
+The local backend application shall support a dry-run or replay-friendly local mode that does not require live Binance streaming.
+
+Milestone: M11
+
+M11 shall not add new trading logic. It shall assemble and coordinate existing components only.
+
+---
+
+## 12. Testing Requirements
 
 ### TEST-001 — Unit Tests
 
@@ -566,7 +613,7 @@ Candle continuity, duplicate prevention, and timestamp alignment shall be testab
 
 ---
 
-## 12. Milestones
+## 13. Milestones
 
 | Milestone | Requirements | Goal |
 |---|---|---|
@@ -580,10 +627,11 @@ Candle continuity, duplicate prevention, and timestamp alignment shall be testab
 | M8 | FR-801 to FR-802 | Replay engine |
 | M9 | FR-104 | Multi-symbol scanner |
 | M10 | AI-1001 to AI-1003 | AI decision engine |
+| M11 | RUNTIME-001 to RUNTIME-005 | Runtime assembly |
 
 ---
 
-## 13. Acceptance Criteria Summary
+## 14. Acceptance Criteria Summary
 
 Version 1 shall be considered successful when the platform can:
 

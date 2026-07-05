@@ -6,7 +6,7 @@ Trading Intelligence Platform (TIP)
 
 ## Current Development Phase
 
-Foundation release stabilization after Milestones M1-M10.
+Phase 2 planning for v0.2.0 Runtime Assembly.
 
 ## What We Are Building
 
@@ -75,15 +75,19 @@ The frontend can render backend-provided candles, structure overlays, BOS overla
 
 ## Next Recommended Phase
 
-Recommended next phase: integration hardening and runtime assembly.
+Recommended next phase: v0.2.0 Runtime Assembly.
+
+Goal: turn the existing M1-M10 components into a runnable local backend application without adding new trading logic.
 
 Suggested priorities:
 
-1. Compose live-mode services end to end behind a local backend application entrypoint.
-2. Wire read stores to live pipeline outputs so the visualization API can serve real runtime state.
-3. Add replay-driven integration tests across candle, timeframe, structure, trend, scanner, and AI boundaries.
-4. Add explicit SRS updates for scanner and AI requirement IDs before expanding those areas further.
-5. Improve frontend runtime integration after the backend app boundary is stable.
+1. Implement M11 application orchestrator for local backend startup/shutdown.
+2. Wire existing config, logging, event bus, storage, market data, candle, timeframe, structure, trend, replay, scanner, AI, and read API components.
+3. Expose clean lifecycle controls: start, stop, health/status.
+4. Provide a dry-run or replay-friendly local mode for deterministic development.
+5. Add integration tests proving components use the existing shared event path.
+
+Short roadmap after M11: connect the assembled backend to local visualization runtime, then harden live/replay operational workflows.
 
 ## LLM Role
 
