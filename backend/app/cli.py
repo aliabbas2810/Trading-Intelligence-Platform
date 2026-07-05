@@ -5,6 +5,7 @@ import json
 import time
 
 from backend.app.runtime import BackendRuntime, RuntimeMode
+from backend.api import create_app
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -14,11 +15,20 @@ def main(argv: list[str] | None = None) -> int:
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--dry-run", action="store_true", help="start without live Binance streaming")
     mode_group.add_argument("--live-binance", action="store_true", help="start Binance live stream when config enables it")
+    parser.add_argument("--api", action="store_true", help="run the local FastAPI service")
+    parser.add_argument("--host", default="127.0.0.1", help="API host when --api is used")
+    parser.add_argument("--port", type=int, default=8000, help="API port when --api is used")
     parser.add_argument("--once", action="store_true", help="print health and stop immediately")
     args = parser.parse_args(argv)
 
     mode = RuntimeMode.LIVE_BINANCE if args.live_binance else RuntimeMode.DRY_RUN
     runtime = BackendRuntime(mode=mode)
+    if args.api:
+        import uvicorn
+
+        uvicorn.run(create_app(runtime), host=args.host, port=args.port)
+        return 0
+
     runtime.start()
     health = runtime.health()
     print(

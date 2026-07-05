@@ -9,6 +9,7 @@ from backend.api.visualization import (
     TrendSnapshot,
     VisualizationReadApi,
 )
+from backend.api.service import create_app
 
 __all__ = [
     "AlignmentReadStore",
@@ -20,4 +21,5 @@ __all__ = [
     "TrendReadStore",
     "TrendSnapshot",
     "VisualizationReadApi",
+    "create_app",
 ]
