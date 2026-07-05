@@ -2,52 +2,107 @@
 
 A modular, deterministic market-structure analysis platform for crypto markets.
 
-The first implementation milestone focuses on live Binance trade ingestion, deterministic candle generation, storage, logging, and replay-ready foundations.
+TIP is currently at the v0.1.0 foundation stage after Milestones M1-M10. The repository contains backend foundations for market data ingestion, candle generation, timeframe aggregation, market structure, trend state, replay, scanner ranking, and structured AI decision support, plus a React visualization foundation.
 
-## Current Scope
+## Current Capabilities
 
-- Binance Spot trade stream
-- BTCUSDT first, multi-symbol later
-- 1-minute authoritative candles
-- 4H / Daily / Weekly derived timeframes
-- Body-based market structure analysis
-- Wick-aware visualization and future SL/TP logic
-- React + Lightweight Charts frontend
-- Python backend first, C++ migration later where justified
+- Typed Python backend foundation with Pydantic settings, structured logging, and synchronous event bus.
+- Binance Spot trade message parsing, normalization, validation, and stream-client skeleton.
+- Deterministic 1-minute UTC candle construction from canonical trades.
+- Synthetic empty candles for missing minutes.
+- In-memory and JSONL candle persistence.
+- Deterministic 4H, Daily, and Weekly candle aggregation from completed 1-minute candles.
+- Body-only market structure detection with displacement-confirmed swings and BOS events.
+- Trend engine with immediate and confirmed flip modes.
+- Multi-timeframe trend aggregation over Weekly, Daily, and 4H outputs.
+- Read-only visualization API boundaries.
+- React + Lightweight Charts frontend foundation.
+- Replay engine that reuses the same event bus path as live mode.
+- Backend multi-symbol scanner foundation over existing engine outputs.
+- Backend AI decision engine foundation over structured deterministic inputs with a mock provider.
 
 ## Project Principles
 
-- Deterministic first
-- Completed candles only
-- Body-based structure, wick-preserved candles
-- Replay-compatible live pipeline
-- Modular pipeline + engine architecture
-- AI reasons over structured outputs, not raw charts
+- Deterministic first.
+- Completed candles only for analysis.
+- Market structure uses candle bodies only.
+- Wicks are preserved for visualization and future SL/TP logic.
+- Replay and live modes share downstream processing paths where practical.
+- Pipelines transform data; engines analyze or enrich context.
+- AI reasons over structured outputs, not raw chart data.
 
-## Start Here
+## Repository Layout
 
-For AI coding agents and Codex, read these first:
+- `backend/core/`: event bus and logging.
+- `backend/config/`: typed settings and default config.
+- `backend/models/`: domain contracts.
+- `backend/pipelines/`: market data, candle, and timeframe pipelines.
+- `backend/engines/`: structure, trend, replay, scanner, and AI engines.
+- `backend/storage/`: persistence boundaries.
+- `backend/api/`: read-only API boundaries.
+- `backend/tests/`: backend tests.
+- `frontend/`: React visualization shell and frontend contract tests.
+- `docs/ADR/`: accepted architecture decisions.
+- `docs/SRS.md`: software requirements specification.
 
-1. [`AGENTS.md`](AGENTS.md)
-2. [`PROJECT_CONTEXT.md`](PROJECT_CONTEXT.md)
-3. [`docs/SRS.md`](docs/SRS.md)
-4. [`docs/ADR/README.md`](docs/ADR/README.md)
+## Setup
 
-## Milestones
+Backend requires Python 3.12+.
 
-| Milestone | Goal |
-|---|---|
-| M1 | Repository foundation, configuration, logging, event system |
-| M2 | Binance market data pipeline |
-| M3 | 1-minute candle pipeline and persistence |
-| M4 | 4H / Daily / Weekly timeframe pipeline |
-| M5 | Market structure engine |
-| M6 | Trend engine |
-| M7 | React visualization platform |
-| M8 | Replay and backtesting |
-| M9 | Multi-symbol scanner |
-| M10 | AI decision engine |
+```powershell
+py -3.12 -m pip install --upgrade pip
+py -3.12 -m pip install -e ".[dev]"
+```
 
-## Status
+Frontend requires Node.js and npm.
 
-Initial repository foundation.
+```powershell
+npm install
+```
+
+## Backend Verification
+
+```powershell
+pytest
+ruff check .
+mypy backend
+```
+
+If command shims are unavailable on Windows, use:
+
+```powershell
+py -3.12 -m pytest
+py -3.12 -m ruff check .
+py -3.12 -m mypy backend
+```
+
+## Frontend Verification
+
+```powershell
+npm test
+```
+
+The root npm test script delegates to the frontend workspace:
+
+```powershell
+npm --prefix frontend test
+```
+
+## Milestone Status
+
+| Milestone | Status | Goal |
+|---|---|---|
+| M1 | Completed | Repository foundation, configuration, logging, event system |
+| M2 | Completed | Binance market data pipeline foundation |
+| M3 | Completed | 1-minute candle pipeline and persistence |
+| M4 | Completed | 4H / Daily / Weekly timeframe pipeline |
+| M5 | Completed | Body-based market structure engine |
+| M6 | Completed | Trend engine and multi-timeframe aggregation |
+| M7 | Completed | Visualization platform foundation |
+| M8 | Completed | Replay engine |
+| M9 | Completed | Multi-symbol scanner foundation |
+| M10 | Completed | AI decision engine foundation |
+
+## Current Status
+
+v0.1.0 foundation is complete. The next recommended phase is integration hardening: assemble runtime services, wire live/replay outputs into read stores, add end-to-end replay integration tests, and stabilize the local backend/frontend development loop.
