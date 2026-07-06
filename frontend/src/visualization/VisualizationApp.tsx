@@ -1,4 +1,4 @@
-import { BarChart3, Eye, EyeOff, Layers, RefreshCw, Ribbon, ToggleLeft } from "lucide-react";
+import { BarChart3, Eye, EyeOff, Layers, RefreshCw, Ribbon, Search, ToggleLeft } from "lucide-react";
 import {
   CandlestickSeries,
   createChart,
@@ -15,9 +15,11 @@ import {
   fetchMarketStructure,
   fetchMultiTimeframeAlignment,
   fetchReplayStatus,
+  fetchScannerStatus,
   fetchTrendState,
   pauseReplay,
   resumeReplay,
+  runScanner,
   startReplay,
   stepReplay,
   stopReplay,
@@ -30,6 +32,9 @@ import type {
   HealthStatusDto,
   ReplaySourceType,
   ReplayStatusDto,
+  ScannerBiasFilter,
+  ScannerSummaryDto,
+  SetupCandidateDto,
   StructureSnapshotDto,
   Timeframe,
   TrendSnapshotDto,
@@ -58,6 +63,15 @@ export function VisualizationApp() {
   const [replayStatus, setReplayStatus] = useState<ReplayStatusDto | null>(null);
   const [replayLoading, setReplayLoading] = useState(false);
   const [replayError, setReplayError] = useState<string | null>(null);
+  const [scannerSymbols, setScannerSymbols] = useState("BTCUSDT, ETHUSDT, SOLUSDT, ADAUSDT");
+  const [scannerBias, setScannerBias] = useState<ScannerBiasFilter>("any");
+  const [scannerMinimumAlignment, setScannerMinimumAlignment] = useState(0);
+  const [scannerMinimumScore, setScannerMinimumScore] = useState(0);
+  const [scannerLimit, setScannerLimit] = useState(10);
+  const [scannerSummary, setScannerSummary] = useState<ScannerSummaryDto | null>(null);
+  const [scannerLoading, setScannerLoading] = useState(false);
+  const [scannerError, setScannerError] = useState<string | null>(null);
+  const [selectedScannerSymbol, setSelectedScannerSymbol] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -138,11 +152,35 @@ export function VisualizationApp() {
     };
   }, [refreshKey]);
 
+  useEffect(() => {
+    let active = true;
+    async function loadScannerStatus() {
+      try {
+        const summary = await fetchScannerStatus();
+        if (active) {
+          setScannerSummary(summary);
+        }
+      } catch (error) {
+        if (active) {
+          setScannerError(error instanceof Error ? error.message : "Unable to load scanner status");
+        }
+      }
+    }
+    void loadScannerStatus();
+    return () => {
+      active = false;
+    };
+  }, [refreshKey]);
+
   const trendState = data.trend.update?.state ?? "transition";
   const visibleBos = useMemo(
     () => selectVisibleBos(data.structure.breaks_of_structure, bosMode),
     [data.structure.breaks_of_structure, bosMode],
   );
+  const chartDataMessage =
+    selectedScannerSymbol === symbol && !loading && errorMessage === null && data.candles.length === 0
+      ? `No chart data available for ${symbol} on ${timeframe}`
+      : null;
 
   async function runReplayAction(action: () => Promise<ReplayStatusDto>): Promise<void> {
     setReplayLoading(true);
@@ -156,6 +194,32 @@ export function VisualizationApp() {
     } finally {
       setReplayLoading(false);
     }
+  }
+
+  async function handleRunScanner(): Promise<void> {
+    setScannerLoading(true);
+    setScannerError(null);
+    try {
+      const summary = await runScanner({
+        symbols: parseScannerSymbols(scannerSymbols),
+        timeframe,
+        bias: scannerBias,
+        minimum_alignment_score: scannerMinimumAlignment,
+        minimum_setup_score: scannerMinimumScore,
+        limit: scannerLimit,
+      });
+      setScannerSummary(summary);
+    } catch (error) {
+      setScannerError(error instanceof Error ? error.message : "Scanner action failed");
+    } finally {
+      setScannerLoading(false);
+    }
+  }
+
+  function selectScannerCandidate(candidate: SetupCandidateDto): void {
+    setSelectedScannerSymbol(candidate.symbol);
+    setSymbol(candidate.symbol);
+    setRefreshKey((value) => value + 1);
   }
 
   return (
@@ -236,12 +300,165 @@ export function VisualizationApp() {
         onStop={() => runReplayAction(stopReplay)}
         onStep={() => runReplayAction(stepReplay)}
       />
+      <ScannerPanel
+        symbols={scannerSymbols}
+        bias={scannerBias}
+        minimumAlignment={scannerMinimumAlignment}
+        minimumScore={scannerMinimumScore}
+        limit={scannerLimit}
+        summary={scannerSummary}
+        loading={scannerLoading}
+        error={scannerError}
+        onSymbolsChange={setScannerSymbols}
+        onBiasChange={setScannerBias}
+        onMinimumAlignmentChange={setScannerMinimumAlignment}
+        onMinimumScoreChange={setScannerMinimumScore}
+        onLimitChange={setScannerLimit}
+        onRun={handleRunScanner}
+        onSelectCandidate={selectScannerCandidate}
+      />
+      {chartDataMessage ? <section className="chart-message" role="status">{chartDataMessage}</section> : null}
       <ChartCanvas
         candles={data.candles}
         structure={data.structure}
         bos={bosVisible ? visibleBos : []}
       />
     </main>
+  );
+}
+
+function ScannerPanel({
+  symbols,
+  bias,
+  minimumAlignment,
+  minimumScore,
+  limit,
+  summary,
+  loading,
+  error,
+  onSymbolsChange,
+  onBiasChange,
+  onMinimumAlignmentChange,
+  onMinimumScoreChange,
+  onLimitChange,
+  onRun,
+  onSelectCandidate,
+}: {
+  symbols: string;
+  bias: ScannerBiasFilter;
+  minimumAlignment: number;
+  minimumScore: number;
+  limit: number;
+  summary: ScannerSummaryDto | null;
+  loading: boolean;
+  error: string | null;
+  onSymbolsChange: (value: string) => void;
+  onBiasChange: (value: ScannerBiasFilter) => void;
+  onMinimumAlignmentChange: (value: number) => void;
+  onMinimumScoreChange: (value: number) => void;
+  onLimitChange: (value: number) => void;
+  onRun: () => void;
+  onSelectCandidate: (candidate: SetupCandidateDto) => void;
+}) {
+  return (
+    <section className="scanner-panel" aria-label="Scanner panel">
+      <div className="scanner-controls">
+        <label>
+          Symbols
+          <input
+            aria-label="Scanner symbols"
+            value={symbols}
+            onChange={(event) => onSymbolsChange(event.target.value)}
+          />
+        </label>
+        <label>
+          Bias
+          <select
+            aria-label="Scanner bias filter"
+            value={bias}
+            onChange={(event) => onBiasChange(event.target.value as ScannerBiasFilter)}
+          >
+            <option value="any">any</option>
+            <option value="bullish">bullish</option>
+            <option value="bearish">bearish</option>
+            <option value="neutral">neutral</option>
+          </select>
+        </label>
+        <label>
+          Min alignment
+          <input
+            aria-label="Minimum alignment score"
+            min={0}
+            max={3}
+            type="number"
+            value={minimumAlignment}
+            onChange={(event) => onMinimumAlignmentChange(Number(event.target.value))}
+          />
+        </label>
+        <label>
+          Min setup score
+          <input
+            aria-label="Minimum setup score"
+            min={0}
+            type="number"
+            value={minimumScore}
+            onChange={(event) => onMinimumScoreChange(Number(event.target.value))}
+          />
+        </label>
+        <label>
+          Top N
+          <input
+            aria-label="Scanner result limit"
+            min={1}
+            type="number"
+            value={limit}
+            onChange={(event) => onLimitChange(Number(event.target.value))}
+          />
+        </label>
+        <button type="button" disabled={loading} onClick={onRun} title="Run scanner">
+          <Search size={16} />
+          Run scan
+        </button>
+      </div>
+      <div className="scanner-status" aria-live="polite">
+        <span>{loading ? "Scanner running" : "Scanner ready"}</span>
+        <span>{summary ? `${summary.candidates.length}/${summary.total_symbols} candidates` : "no scan yet"}</span>
+        {error ? <strong role="alert">Scanner error: {error}</strong> : null}
+      </div>
+      {summary && summary.candidates.length === 0 ? (
+        <p className="scanner-empty">No scanner candidates match the current filters.</p>
+      ) : null}
+      {summary && summary.candidates.length > 0 ? (
+        <table className="scanner-results">
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Bias</th>
+              <th>Alignment</th>
+              <th>Setup score</th>
+              <th>Trend strength</th>
+              <th>Reason</th>
+            </tr>
+          </thead>
+          <tbody>
+            {summary.candidates.map((candidate) => (
+              <tr key={candidate.symbol}>
+                <td>
+                  <button type="button" onClick={() => onSelectCandidate(candidate)}>
+                    {candidate.symbol}
+                  </button>
+                </td>
+                <td>{candidate.bias}</td>
+                <td>{candidate.alignment_score}/3</td>
+                <td>{candidate.score.toFixed(1)}</td>
+                <td>{candidate.trend_strength}</td>
+                <td>{candidate.reasons.join(", ")}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : null}
+    </section>
   );
 }
 
@@ -427,6 +644,13 @@ function selectVisibleBos(items: BreakOfStructureDto[], mode: BosMode): BreakOfS
     return items.slice(-1);
   }
   return items;
+}
+
+function parseScannerSymbols(value: string): string[] {
+  return value
+    .split(",")
+    .map((item) => item.trim().toUpperCase())
+    .filter(Boolean);
 }
 
 function removeAllPriceLines(series: ISeriesApi<"Candlestick">): void {

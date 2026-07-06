@@ -18,7 +18,7 @@ body {
 
 .tip-shell {
   display: grid;
-  grid-template-rows: auto auto auto auto 1fr;
+  grid-template-rows: auto auto auto auto auto auto 1fr;
   min-height: 100%;
   transition: background 160ms ease;
 }
@@ -50,6 +50,8 @@ body {
 .controls,
 .replay-controls,
 .replay-status,
+.scanner-controls,
+.scanner-status,
 .status-strip,
 .trend-ribbon {
   align-items: center;
@@ -68,6 +70,7 @@ body {
 }
 
 select,
+input,
 button {
   align-items: center;
   background: #111827;
@@ -83,6 +86,80 @@ button {
 
 button {
   cursor: pointer;
+}
+
+.scanner-panel {
+  background: #0f172a;
+  border-bottom: 1px solid #243044;
+  display: grid;
+  gap: 10px;
+  padding: 10px 16px;
+}
+
+.scanner-controls,
+.scanner-status {
+  flex-wrap: wrap;
+}
+
+.scanner-controls label {
+  align-items: center;
+  color: #94a3b8;
+  display: inline-flex;
+  font-size: 12px;
+  gap: 6px;
+}
+
+.scanner-controls input {
+  min-width: 72px;
+}
+
+.scanner-controls input[aria-label="Scanner symbols"] {
+  min-width: min(320px, 76vw);
+}
+
+.scanner-status {
+  color: #94a3b8;
+  font-size: 12px;
+  justify-content: space-between;
+}
+
+.scanner-status strong,
+.scanner-empty {
+  color: #fca5a5;
+  font-weight: 600;
+}
+
+.scanner-empty {
+  font-size: 12px;
+  margin: 0;
+}
+
+.scanner-results {
+  border-collapse: collapse;
+  font-size: 12px;
+  width: 100%;
+}
+
+.scanner-results th,
+.scanner-results td {
+  border-top: 1px solid #243044;
+  padding: 7px 8px;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.scanner-results th {
+  color: #94a3b8;
+  font-weight: 600;
+}
+
+.scanner-results td {
+  color: #d8dee9;
+}
+
+.scanner-results button {
+  min-height: 28px;
+  padding: 4px 8px;
 }
 
 .trend-ribbon {
@@ -149,6 +226,14 @@ button {
 .chart-frame {
   min-height: 0;
   position: relative;
+}
+
+.chart-message {
+  background: #111827;
+  border-bottom: 1px solid #243044;
+  color: #facc15;
+  font-size: 12px;
+  padding: 8px 16px;
 }
 
 .chart-surface {

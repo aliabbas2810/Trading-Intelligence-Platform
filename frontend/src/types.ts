@@ -3,6 +3,7 @@ export type StructureLabel = "HH" | "HL" | "LH" | "LL";
 export type BosDirection = "bullish" | "bearish";
 export type TrendState = "bullish" | "bearish" | "transition";
 export type DirectionalBias = "bullish" | "bearish" | "neutral";
+export type ScannerBiasFilter = DirectionalBias | "any";
 export type BosMode = "permanent" | "auto-clean";
 export type ReplaySourceType = "trades" | "candles";
 
@@ -83,4 +84,40 @@ export interface ReplayStatusDto {
   running: boolean;
   paused: boolean;
   stopped: boolean;
+}
+
+export interface ScannerRunRequestDto {
+  symbols?: string[];
+  timeframe?: Timeframe;
+  bias?: ScannerBiasFilter;
+  minimum_alignment_score?: number;
+  minimum_setup_score?: number;
+  limit?: number;
+}
+
+export interface SetupCandidateDto {
+  symbol: string;
+  bias: DirectionalBias;
+  score: number;
+  alignment_score: number;
+  trend_state: TrendState | null;
+  trend_strength: number;
+  has_structure: boolean;
+  has_bos: boolean;
+  latest_price: number | null;
+  reasons: string[];
+}
+
+export interface SymbolScanResultDto {
+  symbol: string;
+  candidate: SetupCandidateDto | null;
+  excluded_reasons: string[];
+}
+
+export interface ScannerSummaryDto {
+  scanned_symbols: string[];
+  total_symbols: number;
+  filtered_symbols: number;
+  candidates: SetupCandidateDto[];
+  results: SymbolScanResultDto[];
 }

@@ -37,6 +37,14 @@ test("frontend calls replay control endpoints", () => {
   assert.match(apiSource, /method: "POST"/);
 });
 
+test("frontend calls scanner API endpoints", () => {
+  assert.match(apiSource, /runScanner/);
+  assert.match(apiSource, /fetchScannerStatus/);
+  assert.match(apiSource, /\/scanner\/run/);
+  assert.match(apiSource, /\/scanner\/status/);
+  assert.match(apiSource, /method: "POST"/);
+});
+
 test("frontend API base URL and polling are configurable", () => {
   assert.match(configSource, /DEFAULT_API_BASE_URL = "http:\/\/127\.0\.0\.1:8000"/);
   assert.match(configSource, /VITE_TIP_API_BASE_URL/);
@@ -49,6 +57,12 @@ test("frontend does not calculate structure or trend labels", () => {
   assert.doesNotMatch(appSource, /body_high|body_low|bodyHigh|bodyLow|higher high|lower low/i);
   assert.doesNotMatch(appSource, /TrendEngine|StructureEngine|ReplayController|classify|detectBos|detectSwing/i);
   assert.doesNotMatch(appSource, /new Candle|new Trade|add_candle|add_event|ReplayRecord/i);
+});
+
+test("scanner UI does not calculate scanner scores locally", () => {
+  assert.doesNotMatch(appSource, /score_candidate|ScannerEngine|setupScore|alignment.*\*|trend.*strength.*\+/i);
+  assert.match(appSource, /candidate\.score/);
+  assert.match(appSource, /candidate\.reasons/);
 });
 
 test("visualization controls required by M7 are present", () => {
@@ -73,6 +87,38 @@ test("replay controls and status are present", () => {
   assert.match(appSource, /processed_events/);
   assert.match(appSource, /total_events/);
   assert.match(appSource, /progress/);
+});
+
+test("scanner controls and results are present", () => {
+  assert.match(appSource, /ScannerPanel/);
+  assert.match(appSource, /Scanner symbols/);
+  assert.match(appSource, /Scanner bias filter/);
+  assert.match(appSource, /Minimum alignment score/);
+  assert.match(appSource, /Minimum setup score/);
+  assert.match(appSource, /Scanner result limit/);
+  assert.match(appSource, /Run scan/);
+  assert.match(appSource, /scanner-results/);
+  assert.match(appSource, /candidate\.symbol/);
+  assert.match(appSource, /candidate\.bias/);
+  assert.match(appSource, /candidate\.alignment_score/);
+  assert.match(appSource, /candidate\.trend_strength/);
+});
+
+test("scanner filters are represented in request payload", () => {
+  assert.match(appSource, /runScanner\(\{/);
+  assert.match(appSource, /symbols: parseScannerSymbols\(scannerSymbols\)/);
+  assert.match(appSource, /timeframe/);
+  assert.match(appSource, /bias: scannerBias/);
+  assert.match(appSource, /minimum_alignment_score: scannerMinimumAlignment/);
+  assert.match(appSource, /minimum_setup_score: scannerMinimumScore/);
+  assert.match(appSource, /limit: scannerLimit/);
+});
+
+test("scanner result selection updates chart symbol without local chart data assumptions", () => {
+  assert.match(appSource, /selectScannerCandidate/);
+  assert.match(appSource, /setSymbol\(candidate\.symbol\)/);
+  assert.match(appSource, /No chart data available for/);
+  assert.match(appSource, /data\.candles\.length === 0/);
 });
 
 test("visualization exposes loading and API error states", () => {

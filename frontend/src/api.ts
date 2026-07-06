@@ -4,6 +4,8 @@ import type {
   MultiTimeframeAlignmentDto,
   ReplaySourceType,
   ReplayStatusDto,
+  ScannerRunRequestDto,
+  ScannerSummaryDto,
   StructureSnapshotDto,
   Timeframe,
   TrendSnapshotDto,
@@ -85,4 +87,12 @@ export function stepReplay(): Promise<ReplayStatusDto> {
 
 export function fetchReplayStatus(): Promise<ReplayStatusDto> {
   return getJson<ReplayStatusDto>("/replay/status");
+}
+
+export function runScanner(request: ScannerRunRequestDto): Promise<ScannerSummaryDto> {
+  return postJson<ScannerSummaryDto>("/scanner/run", request);
+}
+
+export function fetchScannerStatus(): Promise<ScannerSummaryDto> {
+  return getJson<ScannerSummaryDto>("/scanner/status");
 }
