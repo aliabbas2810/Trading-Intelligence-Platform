@@ -295,6 +295,73 @@ def test_replay_trade_events_reach_existing_candle_pipeline() -> None:
     assert replay_candles[0].close == 50_000.0
 
 
+def test_scanner_endpoint_returns_ranked_candidates() -> None:
+    """Covers FR-901, FR-902, FR-903, RUNTIME-004, and TEST-001."""
+
+    runtime = BackendRuntime(settings=demo_disabled_settings(), mode=RuntimeMode.DRY_RUN)
+    seed_scanner_symbol(runtime, "ETHUSDT", DirectionalBias.BULLISH, 2, strength=1)
+    seed_scanner_symbol(runtime, "BTCUSDT", DirectionalBias.BULLISH, 3, strength=4)
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/scanner/run",
+            json={"symbols": ["ETHUSDT", "BTCUSDT"], "timeframe": "4h"},
+        )
+        status_response = client.get("/api/scanner/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [candidate["symbol"] for candidate in payload["candidates"]] == ["BTCUSDT", "ETHUSDT"]
+    assert payload["total_symbols"] == 2
+    assert status_response.status_code == 200
+    assert status_response.json()["total_symbols"] == 2
+
+
+def test_scanner_endpoint_filters_by_bias_score_and_limit() -> None:
+    """Covers FR-904, FR-905, and TEST-001."""
+
+    runtime = BackendRuntime(settings=demo_disabled_settings(), mode=RuntimeMode.DRY_RUN)
+    seed_scanner_symbol(runtime, "BTCUSDT", DirectionalBias.BULLISH, 3, strength=4)
+    seed_scanner_symbol(runtime, "ETHUSDT", DirectionalBias.BEARISH, 3, strength=5)
+    seed_scanner_symbol(runtime, "SOLUSDT", DirectionalBias.BULLISH, 1, strength=0)
+    seed_scanner_symbol(runtime, "ADAUSDT", DirectionalBias.BULLISH, 2, strength=1)
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/scanner/run",
+            json={
+                "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "ADAUSDT"],
+                "bias": "bullish",
+                "minimum_alignment_score": 2,
+                "minimum_setup_score": 25.0,
+                "limit": 1,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [candidate["symbol"] for candidate in payload["candidates"]] == ["BTCUSDT"]
+    excluded = {result["symbol"]: result["excluded_reasons"] for result in payload["results"]}
+    assert excluded["ETHUSDT"] == ["bias_filter"]
+    assert excluded["SOLUSDT"] == ["alignment_filter", "score_filter"]
+
+
+def test_scanner_endpoint_handles_missing_data_cleanly() -> None:
+    """Covers missing data handling for FR-901 and TEST-001."""
+
+    runtime = BackendRuntime(settings=demo_disabled_settings(), mode=RuntimeMode.DRY_RUN)
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post("/api/scanner/run", json={"symbols": ["MISSINGUSDT"], "bias": "any"})
+
+    assert response.status_code == 200
+    candidate = response.json()["candidates"][0]
+    assert candidate["symbol"] == "MISSINGUSDT"
+    assert candidate["bias"] == "neutral"
+    assert candidate["score"] == 0.0
+    assert candidate["reasons"] == ["insufficient_data"]
+
+
 def test_cli_can_run_api_mode_without_starting_server(monkeypatch: pytest.MonkeyPatch) -> None:
     """Covers local API CLI wiring for RUNTIME-001 and TEST-001."""
 
@@ -335,6 +402,90 @@ def test_api_layer_does_not_recompute_analysis_logic() -> None:
 
 def assert_runtime_state(runtime: BackendRuntime, expected: RuntimeState) -> None:
     assert runtime.state is expected
+
+
+def seed_scanner_symbol(
+    runtime: BackendRuntime,
+    symbol: str,
+    bias: DirectionalBias,
+    alignment_score: int,
+    *,
+    strength: int,
+) -> None:
+    trend_state = trend_state_for_bias(bias)
+    trend = TrendUpdate(
+        symbol=symbol,
+        timeframe=Timeframe.FOUR_HOUR,
+        state=trend_state,
+        previous_state=None,
+        strength=TrendStrength(confirming_structure_count=strength),
+        reason="scanner-test",
+        event_time_ms=120_000,
+    )
+    snapshot = TimeframeTrendSnapshot(
+        symbol=symbol,
+        timeframe=Timeframe.FOUR_HOUR,
+        state=trend_state,
+        strength=trend.strength,
+        event_time_ms=trend.event_time_ms,
+    )
+    alignment = MultiTimeframeTrendResult(
+        symbol=symbol,
+        mode=MultiTimeframeMode.VOTING,
+        bias=bias,
+        alignment_score=alignment_score,
+        required_timeframes=(Timeframe.WEEKLY, Timeframe.DAILY, Timeframe.FOUR_HOUR),
+        present_timeframes=(Timeframe.FOUR_HOUR,),
+        missing_timeframes=(Timeframe.WEEKLY, Timeframe.DAILY),
+        snapshots=(snapshot,),
+        reason="scanner-test",
+    )
+    runtime.trend_store.set(trend)
+    runtime.alignment_store.set(alignment)
+    runtime.structure_store.add_swing(
+        StructureSwing(
+            symbol=symbol,
+            timeframe=Timeframe.FOUR_HOUR,
+            kind=SwingKind.HIGH,
+            label=StructureLabel.HH,
+            level=120.0,
+            candle_open_time_ms=0,
+            candle_close_time_ms=60_000,
+        ),
+    )
+    runtime.structure_store.add_break_of_structure(
+        BreakOfStructure(
+            symbol=symbol,
+            timeframe=Timeframe.FOUR_HOUR,
+            direction=BreakDirection.BULLISH if bias is not DirectionalBias.BEARISH else BreakDirection.BEARISH,
+            broken_label=StructureLabel.HH,
+            broken_level=120.0,
+            candle_close=125.0,
+            candle_open_time_ms=60_000,
+            candle_close_time_ms=120_000,
+        ),
+    )
+    runtime.candle_store.save(
+        Candle(
+            symbol=symbol,
+            timeframe=Timeframe.FOUR_HOUR,
+            open_time_ms=0,
+            close_time_ms=60_000,
+            open=100.0,
+            high=130.0,
+            low=90.0,
+            close=125.0,
+            volume=10.0,
+        ),
+    )
+
+
+def trend_state_for_bias(bias: DirectionalBias) -> TrendState:
+    if bias is DirectionalBias.BULLISH:
+        return TrendState.BULLISH
+    if bias is DirectionalBias.BEARISH:
+        return TrendState.BEARISH
+    return TrendState.TRANSITION
 
 
 def demo_disabled_settings() -> PlatformSettings:

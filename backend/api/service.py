@@ -8,6 +8,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.replay import ReplayStartRequest, ReplayStatusResponse
+from backend.api.scanner import ScannerRunRequest, ScannerSummaryResponse
 from backend.app.runtime import BackendRuntime, RuntimeState
 from backend.models import Timeframe
 
@@ -128,6 +129,35 @@ def create_app(runtime: BackendRuntime | None = None) -> FastAPI:
         """Return replay status/progress for RUNTIME-004."""
 
         return ReplayStatusResponse.from_snapshot(runtime_from_request(request).replay_status())
+
+    @app.post("/api/scanner/run")
+    def scanner_run(request: Request, payload: ScannerRunRequest | None = None) -> object:
+        """Run scanner over existing snapshots for FR-901 through FR-905."""
+
+        scan_request = payload or ScannerRunRequest()
+        summary = runtime_from_request(request).run_scanner(
+            symbols=scan_request.symbols,
+            timeframe=scan_request.timeframe,
+            bias=scan_request.bias.to_directional_bias(),
+            minimum_alignment_score=scan_request.minimum_alignment_score,
+            minimum_setup_score=scan_request.minimum_setup_score,
+        )
+        return ScannerSummaryResponse.from_summary(summary, limit=scan_request.limit)
+
+    @app.get("/api/scanner/status")
+    def scanner_status(request: Request) -> object:
+        """Return latest scanner summary for RUNTIME-004."""
+
+        summary = runtime_from_request(request).scanner_status()
+        if summary is None:
+            return ScannerSummaryResponse(
+                scanned_symbols=(),
+                total_symbols=0,
+                filtered_symbols=0,
+                candidates=(),
+                results=(),
+            )
+        return ScannerSummaryResponse.from_summary(summary)
 
     return app
 

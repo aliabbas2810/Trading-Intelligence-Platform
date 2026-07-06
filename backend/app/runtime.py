@@ -17,9 +17,10 @@ from backend.config import PlatformSettings, load_settings
 from backend.core import EventBus, configure_logging, get_logger
 from backend.engines.ai import AiDecisionEngine, RuleBasedMockAiDecisionProvider
 from backend.engines.replay import HistoricalTradeReplaySource, ReplayController
-from backend.engines.scanner import ScannerEngine
+from backend.engines.scanner import ScannerEngine, ScannerSummary, SymbolScanInput
 from backend.engines.structure import MarketStructureEngine, StructureEvent
 from backend.engines.trend import (
+    DirectionalBias,
     MultiTimeframeTrendAggregatedEvent,
     MultiTimeframeTrendAggregator,
     TimeframeTrendSnapshot,
@@ -155,6 +156,7 @@ class BackendRuntime:
             alignment_store=self.alignment_store,
         )
         self.scanner = ScannerEngine(self.event_bus)
+        self._scanner_summary: ScannerSummary | None = None
         self.ai_decision_engine = AiDecisionEngine(RuleBasedMockAiDecisionProvider())
         self.replay_controller = ReplayController(
             self.event_bus,
@@ -273,6 +275,32 @@ class BackendRuntime:
         """Return replay progress/status for RUNTIME-004."""
 
         return self.replay_service.status()
+
+    def run_scanner(
+        self,
+        *,
+        symbols: tuple[str, ...] | None = None,
+        timeframe: Timeframe = Timeframe.FOUR_HOUR,
+        bias: DirectionalBias | None = None,
+        minimum_alignment_score: int = 0,
+        minimum_setup_score: float = 0.0,
+    ) -> ScannerSummary:
+        """Run ScannerEngine over existing runtime snapshots for FR-901 through FR-905."""
+
+        scan_symbols = symbols or tuple(self.settings.market_data.symbols)
+        inputs = tuple(self._scanner_input_for(symbol, timeframe) for symbol in scan_symbols)
+        self._scanner_summary = self.scanner.scan(
+            inputs,
+            bias=bias,
+            minimum_alignment_score=minimum_alignment_score,
+            minimum_setup_score=minimum_setup_score,
+        )
+        return self._scanner_summary
+
+    def scanner_status(self) -> ScannerSummary | None:
+        """Return latest scanner summary for RUNTIME-004."""
+
+        return self._scanner_summary
 
     def _subscribe_components(self) -> None:
         if self._subscribed:
@@ -423,6 +451,19 @@ class BackendRuntime:
             snapshot
             for (snapshot_symbol, _), snapshot in self._trend_snapshots.items()
             if snapshot_symbol == symbol
+        )
+
+    def _scanner_input_for(self, symbol: str, timeframe: Timeframe) -> SymbolScanInput:
+        structure = self.structure_store.list(symbol, timeframe)
+        trend = self.trend_store.get(symbol, timeframe).update
+        candles = self.candle_store.list(symbol, timeframe)
+        return SymbolScanInput(
+            symbol=symbol,
+            trend=trend,
+            alignment=self.alignment_store.get(symbol),
+            structure_swings=structure.swings,
+            breaks_of_structure=structure.breaks_of_structure,
+            latest_candle=candles[-1] if candles else None,
         )
 
 
