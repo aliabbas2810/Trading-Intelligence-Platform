@@ -2,6 +2,8 @@ import type {
   CandleDto,
   HealthStatusDto,
   MultiTimeframeAlignmentDto,
+  ReplaySourceType,
+  ReplayStatusDto,
   StructureSnapshotDto,
   Timeframe,
   TrendSnapshotDto,
@@ -10,6 +12,18 @@ import { API_BASE_URL } from "./config";
 
 async function getJson<T>(path: string): Promise<T> {
   const response = await fetch(`${API_BASE_URL}/api${path}`);
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`);
+  }
+  return response.json() as Promise<T>;
+}
+
+async function postJson<T>(path: string, payload?: object): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}/api${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: payload === undefined ? undefined : JSON.stringify(payload),
+  });
   if (!response.ok) {
     throw new Error(`Request failed: ${response.status}`);
   }
@@ -41,4 +55,34 @@ export function fetchMultiTimeframeAlignment(symbol: string): Promise<MultiTimef
 
 export function fetchHealthStatus(): Promise<HealthStatusDto> {
   return getJson<HealthStatusDto>("/health");
+}
+
+export function startReplay(
+  sourceType: ReplaySourceType,
+  speedMultiplier: number,
+): Promise<ReplayStatusDto> {
+  return postJson<ReplayStatusDto>("/replay/start", {
+    source_type: sourceType,
+    speed_multiplier: speedMultiplier,
+  });
+}
+
+export function pauseReplay(): Promise<ReplayStatusDto> {
+  return postJson<ReplayStatusDto>("/replay/pause");
+}
+
+export function resumeReplay(): Promise<ReplayStatusDto> {
+  return postJson<ReplayStatusDto>("/replay/resume");
+}
+
+export function stopReplay(): Promise<ReplayStatusDto> {
+  return postJson<ReplayStatusDto>("/replay/stop");
+}
+
+export function stepReplay(): Promise<ReplayStatusDto> {
+  return postJson<ReplayStatusDto>("/replay/step");
+}
+
+export function fetchReplayStatus(): Promise<ReplayStatusDto> {
+  return getJson<ReplayStatusDto>("/replay/status");
 }

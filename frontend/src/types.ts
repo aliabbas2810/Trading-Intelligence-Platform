@@ -4,6 +4,7 @@ export type BosDirection = "bullish" | "bearish";
 export type TrendState = "bullish" | "bearish" | "transition";
 export type DirectionalBias = "bullish" | "bearish" | "neutral";
 export type BosMode = "permanent" | "auto-clean";
+export type ReplaySourceType = "trades" | "candles";
 
 export interface CandleDto {
   symbol: string;
@@ -69,4 +70,17 @@ export interface HealthStatusDto {
   state: string;
   mode: string;
   components: Record<string, string>;
+}
+
+export interface ReplayStatusDto {
+  source_type: ReplaySourceType | null;
+  status: string;
+  processed_events: number;
+  total_events: number;
+  current_timestamp_ms: number | null;
+  speed_multiplier: number;
+  progress: number;
+  running: boolean;
+  paused: boolean;
+  stopped: boolean;
 }

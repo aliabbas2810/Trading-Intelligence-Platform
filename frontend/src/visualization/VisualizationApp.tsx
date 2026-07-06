@@ -14,7 +14,13 @@ import {
   fetchHealthStatus,
   fetchMarketStructure,
   fetchMultiTimeframeAlignment,
+  fetchReplayStatus,
   fetchTrendState,
+  pauseReplay,
+  resumeReplay,
+  startReplay,
+  stepReplay,
+  stopReplay,
 } from "../api";
 import { POLL_INTERVAL_MS } from "../config";
 import type {
@@ -22,6 +28,8 @@ import type {
   BreakOfStructureDto,
   CandleDto,
   HealthStatusDto,
+  ReplaySourceType,
+  ReplayStatusDto,
   StructureSnapshotDto,
   Timeframe,
   TrendSnapshotDto,
@@ -45,6 +53,11 @@ export function VisualizationApp() {
   const [bosMode, setBosMode] = useState<BosMode>("permanent");
   const [trendBackground, setTrendBackground] = useState(true);
   const [trendRibbon, setTrendRibbon] = useState(true);
+  const [replaySource, setReplaySource] = useState<ReplaySourceType>("trades");
+  const [replaySpeed, setReplaySpeed] = useState(1);
+  const [replayStatus, setReplayStatus] = useState<ReplayStatusDto | null>(null);
+  const [replayLoading, setReplayLoading] = useState(false);
+  const [replayError, setReplayError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -105,11 +118,45 @@ export function VisualizationApp() {
     return () => window.clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    async function loadReplayStatus() {
+      try {
+        const status = await fetchReplayStatus();
+        if (active) {
+          setReplayStatus(status);
+        }
+      } catch (error) {
+        if (active) {
+          setReplayError(error instanceof Error ? error.message : "Unable to load replay status");
+        }
+      }
+    }
+    void loadReplayStatus();
+    return () => {
+      active = false;
+    };
+  }, [refreshKey]);
+
   const trendState = data.trend.update?.state ?? "transition";
   const visibleBos = useMemo(
     () => selectVisibleBos(data.structure.breaks_of_structure, bosMode),
     [data.structure.breaks_of_structure, bosMode],
   );
+
+  async function runReplayAction(action: () => Promise<ReplayStatusDto>): Promise<void> {
+    setReplayLoading(true);
+    setReplayError(null);
+    try {
+      const status = await action();
+      setReplayStatus(status);
+      setRefreshKey((value) => value + 1);
+    } catch (error) {
+      setReplayError(error instanceof Error ? error.message : "Replay action failed");
+    } finally {
+      setReplayLoading(false);
+    }
+  }
 
   return (
     <main className={`tip-shell trend-${trendBackground ? trendState : "none"}`}>
@@ -175,12 +222,95 @@ export function VisualizationApp() {
           <span>{data.alignmentScore}/3 aligned</span>
         </section>
       ) : null}
+      <ReplayControls
+        source={replaySource}
+        speed={replaySpeed}
+        status={replayStatus}
+        loading={replayLoading}
+        error={replayError}
+        onSourceChange={setReplaySource}
+        onSpeedChange={setReplaySpeed}
+        onStart={() => runReplayAction(() => startReplay(replaySource, replaySpeed))}
+        onPause={() => runReplayAction(pauseReplay)}
+        onResume={() => runReplayAction(resumeReplay)}
+        onStop={() => runReplayAction(stopReplay)}
+        onStep={() => runReplayAction(stepReplay)}
+      />
       <ChartCanvas
         candles={data.candles}
         structure={data.structure}
         bos={bosVisible ? visibleBos : []}
       />
     </main>
+  );
+}
+
+function ReplayControls({
+  source,
+  speed,
+  status,
+  loading,
+  error,
+  onSourceChange,
+  onSpeedChange,
+  onStart,
+  onPause,
+  onResume,
+  onStop,
+  onStep,
+}: {
+  source: ReplaySourceType;
+  speed: number;
+  status: ReplayStatusDto | null;
+  loading: boolean;
+  error: string | null;
+  onSourceChange: (value: ReplaySourceType) => void;
+  onSpeedChange: (value: number) => void;
+  onStart: () => void;
+  onPause: () => void;
+  onResume: () => void;
+  onStop: () => void;
+  onStep: () => void;
+}) {
+  const progressPercent = Math.round((status?.progress ?? 0) * 100);
+  const processed = status?.processed_events ?? 0;
+  const total = status?.total_events ?? 0;
+  return (
+    <section className="replay-panel" aria-label="Replay controls">
+      <div className="replay-controls">
+        <select
+          aria-label="Replay source"
+          value={source}
+          onChange={(event) => onSourceChange(event.target.value as ReplaySourceType)}
+        >
+          <option value="trades">trades</option>
+          <option value="candles">candles</option>
+        </select>
+        <select
+          aria-label="Replay speed"
+          value={speed}
+          onChange={(event) => onSpeedChange(Number(event.target.value))}
+        >
+          <option value={0.5}>0.5x</option>
+          <option value={1}>1x</option>
+          <option value={2}>2x</option>
+          <option value={5}>5x</option>
+        </select>
+        <button type="button" disabled={loading} onClick={onStart}>Start</button>
+        <button type="button" disabled={loading} onClick={onPause}>Pause</button>
+        <button type="button" disabled={loading} onClick={onResume}>Resume</button>
+        <button type="button" disabled={loading} onClick={onStop}>Stop</button>
+        <button type="button" disabled={loading} onClick={onStep}>Step</button>
+      </div>
+      <div className="replay-status" aria-live="polite">
+        <span>Replay: {status?.status ?? "unknown"}</span>
+        <span>{processed}/{total} events</span>
+        <span>{progressPercent}%</span>
+        <span>{status?.source_type ?? "no source"}</span>
+        {loading ? <span>Replay action running</span> : null}
+        {error ? <strong role="alert">Replay error: {error}</strong> : null}
+      </div>
+    </section>
   );
 }
 

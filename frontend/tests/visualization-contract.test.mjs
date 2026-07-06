@@ -27,6 +27,16 @@ test("frontend fetches backend read endpoints", () => {
   assert.match(apiSource, /URLSearchParams/);
 });
 
+test("frontend calls replay control endpoints", () => {
+  assert.match(apiSource, /\/replay\/start/);
+  assert.match(apiSource, /\/replay\/pause/);
+  assert.match(apiSource, /\/replay\/resume/);
+  assert.match(apiSource, /\/replay\/stop/);
+  assert.match(apiSource, /\/replay\/step/);
+  assert.match(apiSource, /\/replay\/status/);
+  assert.match(apiSource, /method: "POST"/);
+});
+
 test("frontend API base URL and polling are configurable", () => {
   assert.match(configSource, /DEFAULT_API_BASE_URL = "http:\/\/127\.0\.0\.1:8000"/);
   assert.match(configSource, /VITE_TIP_API_BASE_URL/);
@@ -37,7 +47,8 @@ test("frontend API base URL and polling are configurable", () => {
 
 test("frontend does not calculate structure or trend labels", () => {
   assert.doesNotMatch(appSource, /body_high|body_low|bodyHigh|bodyLow|higher high|lower low/i);
-  assert.doesNotMatch(appSource, /TrendEngine|StructureEngine|classify|detectBos|detectSwing/i);
+  assert.doesNotMatch(appSource, /TrendEngine|StructureEngine|ReplayController|classify|detectBos|detectSwing/i);
+  assert.doesNotMatch(appSource, /new Candle|new Trade|add_candle|add_event|ReplayRecord/i);
 });
 
 test("visualization controls required by M7 are present", () => {
@@ -48,6 +59,20 @@ test("visualization controls required by M7 are present", () => {
   assert.match(appSource, /Toggle trend background/);
   assert.match(appSource, /Toggle trend ribbon/);
   assert.match(appSource, /Refresh backend data/);
+});
+
+test("replay controls and status are present", () => {
+  assert.match(appSource, /ReplayControls/);
+  assert.match(appSource, /Replay source/);
+  assert.match(appSource, /Replay speed/);
+  assert.match(appSource, /Start/);
+  assert.match(appSource, /Pause/);
+  assert.match(appSource, /Resume/);
+  assert.match(appSource, /Stop/);
+  assert.match(appSource, /Step/);
+  assert.match(appSource, /processed_events/);
+  assert.match(appSource, /total_events/);
+  assert.match(appSource, /progress/);
 });
 
 test("visualization exposes loading and API error states", () => {
