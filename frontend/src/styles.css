@@ -20,6 +20,7 @@ body {
   display: grid;
   grid-template-rows: auto auto auto auto auto auto 1fr;
   min-height: 100%;
+  min-height: 100vh;
   transition: background 160ms ease;
 }
 
@@ -88,17 +89,48 @@ button {
   cursor: pointer;
 }
 
+.scanner-panel,
+.replay-panel {
+  border-bottom: 1px solid #243044;
+  padding: 0;
+}
+
 .scanner-panel {
   background: #0f172a;
-  border-bottom: 1px solid #243044;
-  display: grid;
-  gap: 10px;
-  padding: 10px 16px;
+}
+
+.replay-panel {
+  background: #111827;
+}
+
+.scanner-panel summary,
+.replay-panel summary {
+  align-items: center;
+  color: #d8dee9;
+  cursor: pointer;
+  display: flex;
+  font-size: 12px;
+  gap: 12px;
+  justify-content: space-between;
+  min-height: 34px;
+  padding: 7px 16px;
+  user-select: none;
+}
+
+.scanner-panel summary span:first-child,
+.replay-panel summary span:first-child {
+  font-weight: 600;
+}
+
+.scanner-panel[open],
+.replay-panel[open] {
+  padding-bottom: 10px;
 }
 
 .scanner-controls,
 .scanner-status {
   flex-wrap: wrap;
+  padding: 0 16px;
 }
 
 .scanner-controls label {
@@ -187,17 +219,10 @@ button {
   font-weight: 600;
 }
 
-.replay-panel {
-  background: #111827;
-  border-bottom: 1px solid #243044;
-  display: grid;
-  gap: 8px;
-  padding: 10px 16px;
-}
-
 .replay-controls,
 .replay-status {
   flex-wrap: wrap;
+  padding: 0 16px;
 }
 
 .replay-status {
@@ -224,7 +249,7 @@ button {
 }
 
 .chart-frame {
-  min-height: 0;
+  min-height: min(620px, max(420px, calc(100vh - 230px)));
   position: relative;
 }
 

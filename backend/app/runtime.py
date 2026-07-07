@@ -15,9 +15,9 @@ from backend.api import (
 )
 from backend.config import PlatformSettings, load_settings
 from backend.core import EventBus, configure_logging, get_logger
-from backend.engines.ai import AiDecisionEngine, RuleBasedMockAiDecisionProvider
+from backend.engines.ai import AiDecisionEngine, AiDecisionInput, AiDecisionOutput, RuleBasedMockAiDecisionProvider
 from backend.engines.replay import HistoricalTradeReplaySource, ReplayController
-from backend.engines.scanner import ScannerEngine, ScannerSummary, SymbolScanInput
+from backend.engines.scanner import ScannerEngine, ScannerSummary, SetupCandidate, SymbolScanInput
 from backend.engines.structure import MarketStructureEngine, StructureEvent
 from backend.engines.trend import (
     DirectionalBias,
@@ -162,7 +162,7 @@ class BackendRuntime:
             self.event_bus,
             HistoricalTradeReplaySource(()),
         )
-        self.replay_service = RuntimeReplayService(self.event_bus, symbol=self.active_symbol)
+        self.replay_service = RuntimeReplayService(symbol=self.active_symbol)
         self.multi_timeframe_aggregator = MultiTimeframeTrendAggregator()
         self._structure_engines: dict[tuple[str, Timeframe], MarketStructureEngine] = {}
         self._trend_engines: dict[tuple[str, Timeframe], TrendEngine] = {}
@@ -246,10 +246,15 @@ class BackendRuntime:
         *,
         source_type: ReplaySourceType,
         speed_multiplier: float = 1.0,
+        start_index: int = 0,
     ) -> ReplayStatusSnapshot:
-        """Start replay controls through the runtime for FR-801 and FR-802."""
+        """Start a non-destructive chart replay cursor for FR-801 and FR-802."""
 
-        return self.replay_service.start(source_type=source_type, speed_multiplier=speed_multiplier)
+        return self.replay_service.start(
+            source_type=source_type,
+            speed_multiplier=speed_multiplier,
+            start_index=start_index,
+        )
 
     def pause_replay(self) -> ReplayStatusSnapshot:
         """Pause runtime replay for FR-803."""
@@ -276,6 +281,33 @@ class BackendRuntime:
 
         return self.replay_service.status()
 
+    def reset_analysis_state(self) -> None:
+        """Reset stateful analysis components before a fresh replay session."""
+
+        self.candle_store = InMemoryCandleStore()
+        self.candle_pipeline.reset(self.candle_store)
+        self.timeframe_pipeline.reset(self.candle_store)
+        self.structure_store = InMemoryStructureReadStore()
+        self.trend_store = InMemoryTrendReadStore()
+        self.alignment_store = InMemoryAlignmentReadStore()
+        self.visualization_api = VisualizationReadApi(
+            candle_store=self.candle_store,
+            structure_store=self.structure_store,
+            trend_store=self.trend_store,
+            alignment_store=self.alignment_store,
+        )
+        self.multi_timeframe_aggregator = MultiTimeframeTrendAggregator()
+        self._structure_engines = {}
+        self._trend_engines = {}
+        self._trend_snapshots = {}
+        self._scanner_summary = None
+        self.replay_controller = ReplayController(
+            self.event_bus,
+            HistoricalTradeReplaySource(()),
+        )
+        self.replay_service = RuntimeReplayService(symbol=self.active_symbol)
+        self._demo_seeded = False
+
     def run_scanner(
         self,
         *,
@@ -301,6 +333,32 @@ class BackendRuntime:
         """Return latest scanner summary for RUNTIME-004."""
 
         return self._scanner_summary
+
+    def generate_ai_decision(
+        self,
+        *,
+        symbol: str,
+        timeframe: Timeframe = Timeframe.FOUR_HOUR,
+        entry_signal: str | None = None,
+        risk_reward: str | None = None,
+    ) -> AiDecisionOutput:
+        """Generate a structured mock-provider decision for FR-1001 through FR-1006."""
+
+        structure = self.structure_store.list(symbol, timeframe)
+        trend = self.trend_store.get(symbol, timeframe)
+        alignment = self.alignment_store.get(symbol)
+        setup_candidate = self._latest_setup_candidate(symbol)
+        decision_input = AiDecisionInput(
+            symbol=symbol,
+            timeframe_states=alignment.snapshots if alignment is not None else (),
+            alignment=alignment,
+            setup_candidate=setup_candidate,
+            latest_structure=structure,
+            latest_trend=trend,
+            entry_signal=entry_signal,
+            risk_reward=risk_reward,
+        )
+        return self.ai_decision_engine.generate_decision(decision_input)
 
     def _subscribe_components(self) -> None:
         if self._subscribed:
@@ -397,10 +455,17 @@ class BackendRuntime:
         )
 
     def _handle_candle_closed(self, event: CandleClosedEvent) -> None:
+        self._ensure_candle_stored(event.candle)
         self._handle_completed_candle(event.candle)
 
     def _handle_timeframe_candle_closed(self, event: TimeframeCandleClosedEvent) -> None:
         self._handle_completed_candle(event.candle)
+
+    def _ensure_candle_stored(self, candle: Candle) -> None:
+        existing = self.candle_store.list(candle.symbol, candle.timeframe)
+        if any(stored.open_time_ms == candle.open_time_ms for stored in existing):
+            return
+        self.candle_store.save(candle)
 
     def _handle_completed_candle(self, candle: Candle) -> None:
         structure_engine = self._structure_engine_for(candle)
@@ -465,6 +530,14 @@ class BackendRuntime:
             breaks_of_structure=structure.breaks_of_structure,
             latest_candle=candles[-1] if candles else None,
         )
+
+    def _latest_setup_candidate(self, symbol: str) -> SetupCandidate | None:
+        if self._scanner_summary is None:
+            return None
+        for candidate in self._scanner_summary.candidates:
+            if candidate.symbol == symbol:
+                return candidate
+        return None
 
 
 def structure_event_identity(event: StructureEvent) -> tuple[str, Timeframe]:

@@ -66,10 +66,24 @@ class ReplayController:
             self._set_status(ReplayStatus.COMPLETED, "replay_completed")
             self._publish_progress()
 
+    def begin(self) -> None:
+        """Enter running state without draining the replay source."""
+
+        if self._status is ReplayStatus.COMPLETED:
+            return
+        if self._status is ReplayStatus.STOPPED:
+            self._index = 0
+            self._last_timestamp_ms = None
+        if self._index >= len(self._records):
+            self._set_status(ReplayStatus.COMPLETED, "replay_completed")
+        else:
+            self._set_status(ReplayStatus.RUNNING, "replay_started")
+        self._publish_progress()
+
     def stop(self) -> None:
         """Stop replay for FR-801 status control."""
 
-        if self._status is not ReplayStatus.COMPLETED:
+        if self._status is not ReplayStatus.STOPPED:
             self._set_status(ReplayStatus.STOPPED, "replay_stopped")
 
     def pause(self) -> None:
@@ -96,6 +110,21 @@ class ReplayController:
 
         if self._status is not ReplayStatus.PAUSED:
             self._set_status(ReplayStatus.PAUSED, "replay_step_mode")
+        self._publish_next(apply_speed_delay=False)
+        if self._index >= len(self._records):
+            self._set_status(ReplayStatus.COMPLETED, "replay_completed")
+        self._publish_progress()
+
+    def advance_running_once(self) -> None:
+        """Publish one event while preserving running state for API-driven replay starts."""
+
+        if self._status is not ReplayStatus.RUNNING:
+            return
+        if self._index >= len(self._records):
+            self._set_status(ReplayStatus.COMPLETED, "replay_completed")
+            self._publish_progress()
+            return
+
         self._publish_next(apply_speed_delay=False)
         if self._index >= len(self._records):
             self._set_status(ReplayStatus.COMPLETED, "replay_completed")

@@ -27,6 +27,12 @@ class OneMinuteCandlePipeline:
     def subscribe(self) -> None:
         self._event_bus.subscribe(TradeReceivedEvent, self._handle_trade_event)
 
+    def reset(self, store: CandleStore) -> None:
+        """Reset stateful candle construction for a fresh replay/runtime session."""
+
+        self._store = store
+        self._builder = OneMinuteCandleBuilder()
+
     def handle_trade(self, trade: Trade) -> None:
         closed = self._builder.add_trade(trade)
         self._publish_closed_candles(closed)

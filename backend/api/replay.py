@@ -10,6 +10,7 @@ class ReplayStartRequest(BaseModel):
 
     source_type: ReplaySourceType = ReplaySourceType.TRADES
     speed_multiplier: float = Field(default=1.0, gt=0)
+    start_index: int = Field(default=0, ge=0)
 
 
 class ReplayStatusResponse(BaseModel):
@@ -38,5 +39,5 @@ class ReplayStatusResponse(BaseModel):
             progress=snapshot.progress,
             running=snapshot.status.value == "running",
             paused=snapshot.status.value == "paused",
-            stopped=snapshot.status.value in {"stopped", "completed"},
+            stopped=snapshot.status.value == "stopped",
         )

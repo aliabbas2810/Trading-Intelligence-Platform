@@ -25,6 +25,14 @@ class TimeframePipeline:
     def subscribe(self) -> None:
         self._event_bus.subscribe(CandleClosedEvent, self._handle_candle_closed_event)
 
+    def reset(self, store: CandleStore) -> None:
+        """Reset stateful higher-timeframe aggregation for a fresh replay/runtime session."""
+
+        self._store = store
+        self._aggregators = tuple(
+            TimeframeAggregator(aggregator.timeframe) for aggregator in self._aggregators
+        )
+
     def handle_one_minute_candle(self, candle: Candle) -> tuple[Candle, ...]:
         completed: list[Candle] = []
         for aggregator in self._aggregators:

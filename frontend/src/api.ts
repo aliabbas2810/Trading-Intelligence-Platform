@@ -62,10 +62,12 @@ export function fetchHealthStatus(): Promise<HealthStatusDto> {
 export function startReplay(
   sourceType: ReplaySourceType,
   speedMultiplier: number,
+  startIndex: number,
 ): Promise<ReplayStatusDto> {
   return postJson<ReplayStatusDto>("/replay/start", {
     source_type: sourceType,
     speed_multiplier: speedMultiplier,
+    start_index: startIndex,
   });
 }
 

@@ -8,6 +8,7 @@ const appSource = readFileSync(join(root, "src", "visualization", "Visualization
 const apiSource = readFileSync(join(root, "src", "api.ts"), "utf8");
 const configSource = readFileSync(join(root, "src", "config.ts"), "utf8");
 const typeSource = readFileSync(join(root, "src", "types.ts"), "utf8");
+const styleSource = readFileSync(join(root, "src", "styles.css"), "utf8");
 
 test("visualization uses Lightweight Charts and renders backend overlays", () => {
   assert.match(appSource, /from "lightweight-charts"/);
@@ -47,6 +48,7 @@ test("frontend calls scanner API endpoints", () => {
 
 test("frontend API base URL and polling are configurable", () => {
   assert.match(configSource, /DEFAULT_API_BASE_URL = "http:\/\/127\.0\.0\.1:8000"/);
+  assert.match(configSource, /DEFAULT_POLL_INTERVAL_MS = 0/);
   assert.match(configSource, /VITE_TIP_API_BASE_URL/);
   assert.match(configSource, /VITE_TIP_POLL_INTERVAL_MS/);
   assert.match(appSource, /POLL_INTERVAL_MS/);
@@ -77,8 +79,10 @@ test("visualization controls required by M7 are present", () => {
 
 test("replay controls and status are present", () => {
   assert.match(appSource, /ReplayControls/);
+  assert.match(appSource, /useState<ReplaySourceType>\("candles"\)/);
   assert.match(appSource, /Replay source/);
   assert.match(appSource, /Replay speed/);
+  assert.match(appSource, /Replay start candle/);
   assert.match(appSource, /Start/);
   assert.match(appSource, /Pause/);
   assert.match(appSource, /Resume/);
@@ -87,6 +91,37 @@ test("replay controls and status are present", () => {
   assert.match(appSource, /processed_events/);
   assert.match(appSource, /total_events/);
   assert.match(appSource, /progress/);
+});
+
+test("replay demo UX defaults to visible candle replay", () => {
+  assert.match(appSource, /useState<ReplaySourceType>\("candles"\)/);
+  assert.match(appSource, /Replay has not produced completed candles yet\./);
+  assert.match(appSource, /replayNoCandlesMessage/);
+  assert.doesNotMatch(appSource, /setTimeframe\("1m"\)/);
+});
+
+test("TradingView-style replay filters displayed chart data without clearing backend data", () => {
+  assert.match(apiSource, /start_index: startIndex/);
+  assert.match(appSource, /replayCursorTimestamp/);
+  assert.match(appSource, /filterCandlesForReplayCursor/);
+  assert.match(appSource, /filterStructureForReplayCursor/);
+  assert.match(appSource, /filterTrendForReplayCursor/);
+  assert.match(appSource, /candle\.close_time_ms <= cursorTimeMs/);
+  assert.match(appSource, /swing\.candle_close_time_ms <= cursorTimeMs/);
+  assert.match(appSource, /item\.candle_close_time_ms <= cursorTimeMs/);
+  assert.match(appSource, /Replay cursor:/);
+  assert.match(appSource, /candles=\{visibleCandles\}/);
+  assert.doesNotMatch(appSource, /resetAnalysis|clearCandles|setData\(\{\s*candles: \[\]/);
+});
+
+test("replay and scanner panels are collapsible so the chart stays primary", () => {
+  assert.match(appSource, /<details className="replay-panel"/);
+  assert.match(appSource, /<details className="scanner-panel"/);
+  assert.doesNotMatch(appSource, /<details className="replay-panel" open/);
+  assert.doesNotMatch(appSource, /<details className="scanner-panel" open/);
+  assert.match(styleSource, /\.chart-frame/);
+  assert.match(styleSource, /calc\(100vh - 230px\)/);
+  assert.match(styleSource, /max\(420px/);
 });
 
 test("scanner controls and results are present", () => {
@@ -130,6 +165,20 @@ test("visualization exposes loading and API error states", () => {
   assert.match(appSource, /API error:/);
   assert.match(appSource, /chartError/);
   assert.match(appSource, /Chart error:/);
+});
+
+test("visualization exposes stabilization diagnostics", () => {
+  assert.match(appSource, /lastRefreshTime/);
+  assert.match(appSource, /Runtime:/);
+  assert.match(appSource, /Candles:/);
+  assert.match(appSource, /Structure:/);
+  assert.match(appSource, /BOS:/);
+  assert.match(appSource, /Trend:/);
+  assert.match(appSource, /Replay:/);
+  assert.match(appSource, /Last refresh:/);
+  assert.match(appSource, /data\.candles\.length/);
+  assert.match(appSource, /visibleStructure\.swings\.length/);
+  assert.match(appSource, /visibleStructure\.breaks_of_structure\.length/);
 });
 
 test("structure overlays include HH, HL, LH, and LL horizontal labeled lines", () => {

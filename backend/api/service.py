@@ -7,6 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 
+from backend.api.ai import AiDecisionRequest, AiDecisionResponse
 from backend.api.replay import ReplayStartRequest, ReplayStatusResponse
 from backend.api.scanner import ScannerRunRequest, ScannerSummaryResponse
 from backend.app.runtime import BackendRuntime, RuntimeState
@@ -97,6 +98,7 @@ def create_app(runtime: BackendRuntime | None = None) -> FastAPI:
         snapshot = runtime_from_request(request).start_replay(
             source_type=replay_request.source_type,
             speed_multiplier=replay_request.speed_multiplier,
+            start_index=replay_request.start_index,
         )
         return ReplayStatusResponse.from_snapshot(snapshot)
 
@@ -120,7 +122,7 @@ def create_app(runtime: BackendRuntime | None = None) -> FastAPI:
 
     @app.post("/api/replay/step")
     def replay_step(request: Request) -> object:
-        """Publish one replay event through the runtime for FR-805 and FR-806."""
+        """Advance the runtime replay cursor for FR-805."""
 
         return ReplayStatusResponse.from_snapshot(runtime_from_request(request).step_replay())
 
@@ -158,6 +160,18 @@ def create_app(runtime: BackendRuntime | None = None) -> FastAPI:
                 results=(),
             )
         return ScannerSummaryResponse.from_summary(summary)
+
+    @app.post("/api/ai/decision")
+    def ai_decision(request: Request, payload: AiDecisionRequest) -> object:
+        """Return structured mock-provider decision output for FR-1001 through FR-1006."""
+
+        output = runtime_from_request(request).generate_ai_decision(
+            symbol=payload.symbol,
+            timeframe=payload.timeframe,
+            entry_signal=payload.entry_signal,
+            risk_reward=payload.risk_reward,
+        )
+        return AiDecisionResponse.from_output(output)
 
     return app
 

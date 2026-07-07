@@ -102,6 +102,18 @@ Start the frontend development server in another terminal:
 npm --prefix frontend run dev -- --host 127.0.0.1 --port 5173
 ```
 
+## Local Run Checklist
+
+Use this quick checklist when validating the local backend/frontend loop:
+
+1. Start the backend API with `py -3.12 -m backend.app --api --dry-run --host 127.0.0.1 --port 8000`.
+2. Open `http://127.0.0.1:8000/api/health` and confirm the runtime reports `running`.
+3. Run `py -3.12 scripts/smoke_api.py --base-url http://127.0.0.1:8000 --symbol BTCUSDT --timeframe 4h`.
+4. Start the frontend with `npm --prefix frontend run dev -- --host 127.0.0.1 --port 5173`.
+5. Open `http://127.0.0.1:5173` and confirm the chart, diagnostics strip, replay controls, and scanner panel render.
+6. Switch through all supported timeframes and confirm candles/structure/trend diagnostics update.
+7. Check browser developer tools for uncaught errors.
+
 The frontend defaults to `http://127.0.0.1:8000` for API calls. Override it with:
 
 ```powershell

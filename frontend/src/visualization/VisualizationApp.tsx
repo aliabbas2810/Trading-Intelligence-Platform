@@ -58,8 +58,9 @@ export function VisualizationApp() {
   const [bosMode, setBosMode] = useState<BosMode>("permanent");
   const [trendBackground, setTrendBackground] = useState(true);
   const [trendRibbon, setTrendRibbon] = useState(true);
-  const [replaySource, setReplaySource] = useState<ReplaySourceType>("trades");
+  const [replaySource, setReplaySource] = useState<ReplaySourceType>("candles");
   const [replaySpeed, setReplaySpeed] = useState(1);
+  const [replayStartIndex, setReplayStartIndex] = useState(0);
   const [replayStatus, setReplayStatus] = useState<ReplayStatusDto | null>(null);
   const [replayLoading, setReplayLoading] = useState(false);
   const [replayError, setReplayError] = useState<string | null>(null);
@@ -75,6 +76,7 @@ export function VisualizationApp() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [lastRefreshTime, setLastRefreshTime] = useState<string | null>(null);
   const [data, setData] = useState<VisualizationData>({
     candles: [],
     structure: { swings: [], breaks_of_structure: [] },
@@ -106,6 +108,7 @@ export function VisualizationApp() {
           alignmentScore: alignment?.alignment_score ?? 0,
           health,
         });
+        setLastRefreshTime(new Date().toLocaleTimeString());
       } catch (error) {
         if (active) {
           setErrorMessage(error instanceof Error ? error.message : "Unable to load backend data");
@@ -172,15 +175,37 @@ export function VisualizationApp() {
     };
   }, [refreshKey]);
 
-  const trendState = data.trend.update?.state ?? "transition";
+  const replayActive = isReplayActive(replayStatus);
+  const replayCursorTimeMs = replayCursorTimestamp(data.candles, replayStatus);
+  const visibleCandles = useMemo(
+    () => filterCandlesForReplayCursor(data.candles, replayCursorTimeMs),
+    [data.candles, replayCursorTimeMs],
+  );
+  const visibleStructure = useMemo(
+    () => filterStructureForReplayCursor(data.structure, replayCursorTimeMs),
+    [data.structure, replayCursorTimeMs],
+  );
+  const visibleTrend = useMemo(
+    () => filterTrendForReplayCursor(data.trend, replayCursorTimeMs),
+    [data.trend, replayCursorTimeMs],
+  );
+  const trendState = visibleTrend.update?.state ?? "transition";
   const visibleBos = useMemo(
-    () => selectVisibleBos(data.structure.breaks_of_structure, bosMode),
-    [data.structure.breaks_of_structure, bosMode],
+    () => selectVisibleBos(visibleStructure.breaks_of_structure, bosMode),
+    [visibleStructure.breaks_of_structure, bosMode],
   );
   const chartDataMessage =
     selectedScannerSymbol === symbol && !loading && errorMessage === null && data.candles.length === 0
       ? `No chart data available for ${symbol} on ${timeframe}`
       : null;
+  const replayNoCandlesMessage =
+    replayActive && !loading && errorMessage === null && data.candles.length > 0 && visibleCandles.length === 0
+      ? "Replay has not produced completed candles yet."
+      : null;
+  const structureCount = visibleStructure.swings.length;
+  const bosCount = visibleStructure.breaks_of_structure.length;
+  const runtimeMode = data.health?.mode ?? "mode unknown";
+  const replayState = replayStatus?.status ?? "replay unknown";
 
   async function runReplayAction(action: () => Promise<ReplayStatusDto>): Promise<void> {
     setReplayLoading(true);
@@ -276,7 +301,14 @@ export function VisualizationApp() {
       </section>
       <section className="status-strip" aria-live="polite">
         <span>{loading ? "Loading backend data" : "Backend data loaded"}</span>
-        <span>{data.health?.state ?? "status unknown"}</span>
+        <span>Runtime: {runtimeMode}</span>
+        <span>Candles: {visibleCandles.length}</span>
+        <span>Structure: {structureCount}</span>
+        <span>BOS: {bosCount}</span>
+        <span>Trend: {trendState}</span>
+        <span>Replay: {replayState}</span>
+        <span>Replay cursor: {replayStatus ? `${replayStatus.processed_events}/${replayStatus.total_events}` : "off"}</span>
+        <span>Last refresh: {lastRefreshTime ?? "not yet"}</span>
         {errorMessage ? <strong role="alert">API error: {errorMessage}</strong> : null}
       </section>
       {trendRibbon ? (
@@ -289,12 +321,14 @@ export function VisualizationApp() {
       <ReplayControls
         source={replaySource}
         speed={replaySpeed}
+        startIndex={replayStartIndex}
         status={replayStatus}
         loading={replayLoading}
         error={replayError}
         onSourceChange={setReplaySource}
         onSpeedChange={setReplaySpeed}
-        onStart={() => runReplayAction(() => startReplay(replaySource, replaySpeed))}
+        onStartIndexChange={setReplayStartIndex}
+        onStart={() => runReplayAction(() => startReplay(replaySource, replaySpeed, replayStartIndex))}
         onPause={() => runReplayAction(pauseReplay)}
         onResume={() => runReplayAction(resumeReplay)}
         onStop={() => runReplayAction(stopReplay)}
@@ -317,14 +351,56 @@ export function VisualizationApp() {
         onRun={handleRunScanner}
         onSelectCandidate={selectScannerCandidate}
       />
+      {replayNoCandlesMessage ? (
+        <section className="chart-message" role="status">{replayNoCandlesMessage}</section>
+      ) : null}
       {chartDataMessage ? <section className="chart-message" role="status">{chartDataMessage}</section> : null}
       <ChartCanvas
-        candles={data.candles}
-        structure={data.structure}
+        candles={visibleCandles}
+        structure={visibleStructure}
         bos={bosVisible ? visibleBos : []}
       />
     </main>
   );
+}
+
+function isReplayActive(status: ReplayStatusDto | null): boolean {
+  return status !== null && status.source_type !== null && !["ready", "stopped"].includes(status.status);
+}
+
+function replayCursorTimestamp(candles: CandleDto[], status: ReplayStatusDto | null): number | null {
+  if (!isReplayActive(status) || candles.length === 0 || status.processed_events <= 0) {
+    return null;
+  }
+  const cursorIndex = Math.min(status.processed_events - 1, candles.length - 1);
+  return candles[cursorIndex]?.close_time_ms ?? null;
+}
+
+function filterCandlesForReplayCursor(candles: CandleDto[], cursorTimeMs: number | null): CandleDto[] {
+  if (cursorTimeMs === null) {
+    return candles;
+  }
+  return candles.filter((candle) => candle.close_time_ms <= cursorTimeMs);
+}
+
+function filterStructureForReplayCursor(
+  structure: StructureSnapshotDto,
+  cursorTimeMs: number | null,
+): StructureSnapshotDto {
+  if (cursorTimeMs === null) {
+    return structure;
+  }
+  return {
+    swings: structure.swings.filter((swing) => swing.candle_close_time_ms <= cursorTimeMs),
+    breaks_of_structure: structure.breaks_of_structure.filter((item) => item.candle_close_time_ms <= cursorTimeMs),
+  };
+}
+
+function filterTrendForReplayCursor(trend: TrendSnapshotDto, cursorTimeMs: number | null): TrendSnapshotDto {
+  if (cursorTimeMs === null || trend.update === null || trend.update.event_time_ms <= cursorTimeMs) {
+    return trend;
+  }
+  return { update: null };
 }
 
 function ScannerPanel({
@@ -361,7 +437,11 @@ function ScannerPanel({
   onSelectCandidate: (candidate: SetupCandidateDto) => void;
 }) {
   return (
-    <section className="scanner-panel" aria-label="Scanner panel">
+    <details className="scanner-panel" aria-label="Scanner panel">
+      <summary>
+        <span>Scanner</span>
+        <span>{summary ? `${summary.candidates.length}/${summary.total_symbols} candidates` : "ready"}</span>
+      </summary>
       <div className="scanner-controls">
         <label>
           Symbols
@@ -458,18 +538,20 @@ function ScannerPanel({
           </tbody>
         </table>
       ) : null}
-    </section>
+    </details>
   );
 }
 
 function ReplayControls({
   source,
   speed,
+  startIndex,
   status,
   loading,
   error,
   onSourceChange,
   onSpeedChange,
+  onStartIndexChange,
   onStart,
   onPause,
   onResume,
@@ -478,11 +560,13 @@ function ReplayControls({
 }: {
   source: ReplaySourceType;
   speed: number;
+  startIndex: number;
   status: ReplayStatusDto | null;
   loading: boolean;
   error: string | null;
   onSourceChange: (value: ReplaySourceType) => void;
   onSpeedChange: (value: number) => void;
+  onStartIndexChange: (value: number) => void;
   onStart: () => void;
   onPause: () => void;
   onResume: () => void;
@@ -493,7 +577,12 @@ function ReplayControls({
   const processed = status?.processed_events ?? 0;
   const total = status?.total_events ?? 0;
   return (
-    <section className="replay-panel" aria-label="Replay controls">
+    <details className="replay-panel" aria-label="Replay controls">
+      <summary>
+        <span>Replay</span>
+        <span>{status?.status ?? "ready"}</span>
+        <span>{processed}/{total} events</span>
+      </summary>
       <div className="replay-controls">
         <select
           aria-label="Replay source"
@@ -513,6 +602,16 @@ function ReplayControls({
           <option value={2}>2x</option>
           <option value={5}>5x</option>
         </select>
+        <label>
+          Replay start candle
+          <input
+            aria-label="Replay start candle"
+            min={0}
+            type="number"
+            value={startIndex}
+            onChange={(event) => onStartIndexChange(Number(event.target.value))}
+          />
+        </label>
         <button type="button" disabled={loading} onClick={onStart}>Start</button>
         <button type="button" disabled={loading} onClick={onPause}>Pause</button>
         <button type="button" disabled={loading} onClick={onResume}>Resume</button>
@@ -527,7 +626,7 @@ function ReplayControls({
         {loading ? <span>Replay action running</span> : null}
         {error ? <strong role="alert">Replay error: {error}</strong> : null}
       </div>
-    </section>
+    </details>
   );
 }
 
