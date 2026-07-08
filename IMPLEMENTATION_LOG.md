@@ -140,3 +140,18 @@ Implemented scope:
 - `RISK-006`: explicit exclusion of position sizing, order execution, AI risk decisions, and recalculation of upstream logic.
 
 Verification: covered by backend pytest, ruff, and mypy.
+
+### M23 - Checklist Engine
+
+Implemented deterministic backend checklist foundation that consumes Entry DecisionTrace evidence, RiskPlan evidence, multi-timeframe alignment, and runtime/data-quality metadata.
+
+Implemented scope:
+
+- `CHECKLIST-001`: ChecklistInput, ChecklistItem, and ChecklistResult models.
+- `CHECKLIST-002`: conversion of entry evidence, missing confirmations, and invalidation evidence into checklist items.
+- `CHECKLIST-003`: conversion of risk evidence, warnings, and risk assessment state into checklist items.
+- `CHECKLIST-004`: deterministic checklist counts, overall status, and summary.
+- `CHECKLIST-005`: graceful missing Entry/Risk input handling.
+- `CHECKLIST-006`: explicit exclusion of recalculating upstream analysis, AI reasoning, position sizing, and order execution.
+
+Verification: covered by backend pytest, ruff, and mypy.

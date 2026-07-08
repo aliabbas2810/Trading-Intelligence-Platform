@@ -8,6 +8,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.ai import AiDecisionRequest, AiDecisionResponse
+from backend.api.checklist import ChecklistEvaluateRequest, ChecklistResultResponse
 from backend.api.entry import EntryDecisionResponse, EntryEvaluateRequest
 from backend.api.replay import ReplayStartRequest, ReplayStatusResponse
 from backend.api.risk import RiskEvaluateRequest, RiskPlanResponse
@@ -192,6 +193,16 @@ def create_app(runtime: BackendRuntime | None = None) -> FastAPI:
             target_mode=payload.target_mode,
         )
         return RiskPlanResponse.from_plan(plan)
+
+    @app.post("/api/checklist/evaluate")
+    def checklist_evaluate(request: Request, payload: ChecklistEvaluateRequest) -> object:
+        """Evaluate evidence-driven checklist for CHECKLIST-001 through CHECKLIST-006."""
+
+        result = runtime_from_request(request).evaluate_checklist(
+            symbol=payload.symbol,
+            minimum_risk_reward=payload.minimum_risk_reward,
+        )
+        return ChecklistResultResponse.from_result(result)
 
     return app
 

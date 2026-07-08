@@ -587,6 +587,33 @@ def test_risk_evaluate_endpoint_returns_risk_plan() -> None:
     }
 
 
+def test_checklist_evaluate_endpoint_returns_checklist_result() -> None:
+    """Covers CHECKLIST-001 through CHECKLIST-006 and TEST-001."""
+
+    runtime = BackendRuntime(settings=demo_disabled_settings(), mode=RuntimeMode.DRY_RUN)
+    seed_entry_ready_symbol(runtime, "BTCUSDT")
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/checklist/evaluate",
+            json={"symbol": "BTCUSDT", "minimum_risk_reward": 2.0},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["symbol"] == "BTCUSDT"
+    assert payload["overall_status"] == "PASS"
+    assert payload["pass_count"] > 0
+    assert payload["fail_count"] == 0
+    assert {item["category"] for item in payload["items"]} >= {
+        "TREND_ALIGNMENT",
+        "STRUCTURE_CONFIRMATION",
+        "ENTRY_CONFIRMATION",
+        "RISK_VALIDATION",
+    }
+    assert "PASS:" in payload["summary"]
+
+
 def test_cli_can_run_api_mode_without_starting_server(monkeypatch: pytest.MonkeyPatch) -> None:
     """Covers local API CLI wiring for RUNTIME-001 and TEST-001."""
 
@@ -614,6 +641,7 @@ def test_api_layer_does_not_recompute_analysis_logic() -> None:
             Path("backend/api/ai.py").read_text(encoding="utf-8"),
             Path("backend/api/entry.py").read_text(encoding="utf-8"),
             Path("backend/api/risk.py").read_text(encoding="utf-8"),
+            Path("backend/api/checklist.py").read_text(encoding="utf-8"),
         ),
     )
 

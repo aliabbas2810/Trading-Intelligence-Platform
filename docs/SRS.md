@@ -90,6 +90,7 @@ Requirement IDs use the following prefixes:
 | AI | Artificial Intelligence Requirement |
 | ENTRY | Entry Signal Requirement |
 | RISK | Risk Requirement |
+| CHECKLIST | Checklist Requirement |
 
 Priorities:
 
@@ -519,7 +520,59 @@ Milestone: M22
 
 ---
 
-### 4.10 Future AI Decision Engine
+### 4.10 Checklist Engine
+
+#### CHECKLIST-001 — Build Evidence Checklist
+
+Priority: High
+
+The platform shall produce a deterministic checklist from existing Entry DecisionTrace evidence, RiskPlan evidence, multi-timeframe alignment, and runtime/data-quality metadata.
+
+Milestone: M23
+
+#### CHECKLIST-002 — Convert Entry Evidence
+
+Priority: High
+
+The Checklist Engine shall convert entry evidence, missing confirmations, and invalidation evidence into structured checklist items without recalculating entry, structure, BOS, or trend logic.
+
+Milestone: M23
+
+#### CHECKLIST-003 — Convert Risk Evidence
+
+Priority: High
+
+The Checklist Engine shall convert risk evidence, warnings, and risk assessment state into structured risk-validation checklist items without recalculating risk.
+
+Milestone: M23
+
+#### CHECKLIST-004 — Summarize Checklist Status
+
+Priority: High
+
+The Checklist Engine shall produce deterministic pass, fail, warning, and missing counts plus an overall status and summary.
+
+Milestone: M23
+
+#### CHECKLIST-005 — Handle Missing Inputs
+
+Priority: High
+
+The Checklist Engine shall handle missing Entry or Risk inputs gracefully using MISSING or NOT_APPLICABLE checklist items.
+
+Milestone: M23
+
+#### CHECKLIST-006 — No Trading Logic or Execution
+
+Priority: Mandatory
+
+The Checklist Engine shall not calculate candles, structure, BOS, trend, entry, risk, scanner score, AI reasoning, position size, orders, or execution decisions.
+
+Milestone: M23
+
+---
+
+### 4.11 Future AI Decision Engine
 
 #### AI-1001 — Consume Structured Market Context
 
@@ -736,6 +789,7 @@ Candle continuity, duplicate prevention, and timestamp alignment shall be testab
 | M11 | RUNTIME-001 to RUNTIME-005 | Runtime assembly |
 | M21 | ENTRY-001 to ENTRY-006 | Entry signal engine |
 | M22 | RISK-001 to RISK-006 | Risk engine |
+| M23 | CHECKLIST-001 to CHECKLIST-006 | Checklist engine |
 
 ---
 

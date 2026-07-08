@@ -16,6 +16,7 @@ from backend.api import (
 from backend.config import PlatformSettings, load_settings
 from backend.core import EventBus, configure_logging, get_logger
 from backend.engines.ai import AiDecisionEngine, AiDecisionInput, AiDecisionOutput, RuleBasedMockAiDecisionProvider
+from backend.engines.checklist import ChecklistEngine, ChecklistInput, ChecklistResult
 from backend.engines.entry import DecisionTrace, EntrySignalEngine, EntrySignalInput
 from backend.engines.replay import HistoricalTradeReplaySource, ReplayController
 from backend.engines.risk import RiskEngine, RiskInput, RiskPlan
@@ -162,6 +163,7 @@ class BackendRuntime:
         self.ai_decision_engine = AiDecisionEngine(RuleBasedMockAiDecisionProvider())
         self.entry_signal_engine = EntrySignalEngine()
         self.risk_engine = RiskEngine()
+        self.checklist_engine = ChecklistEngine()
         self.replay_controller = ReplayController(
             self.event_bus,
             HistoricalTradeReplaySource(()),
@@ -234,6 +236,7 @@ class BackendRuntime:
             ComponentHealth("ai_decision_engine", status, "mock provider ready"),
             ComponentHealth("entry_signal_engine", status, "deterministic entry-state foundation ready"),
             ComponentHealth("risk_engine", status, "deterministic risk foundation ready"),
+            ComponentHealth("checklist_engine", status, "evidence-driven checklist foundation ready"),
             ComponentHealth("visualization_api", status, "read-only API boundary ready"),
             ComponentHealth(
                 "demo_data",
@@ -305,6 +308,7 @@ class BackendRuntime:
         self.multi_timeframe_aggregator = MultiTimeframeTrendAggregator()
         self.entry_signal_engine = EntrySignalEngine()
         self.risk_engine = RiskEngine()
+        self.checklist_engine = ChecklistEngine()
         self._structure_engines = {}
         self._trend_engines = {}
         self._trend_snapshots = {}
@@ -390,6 +394,30 @@ class BackendRuntime:
                 bos_events=self._risk_bos_events(symbol),
                 minimum_risk_reward=minimum_risk_reward,
                 target_mode=target_mode,
+            ),
+        )
+
+    def evaluate_checklist(
+        self,
+        *,
+        symbol: str,
+        minimum_risk_reward: float | None = 2.0,
+    ) -> ChecklistResult:
+        """Evaluate checklist from existing entry/risk evidence for CHECKLIST-001 through CHECKLIST-006."""
+
+        entry_trace = self.evaluate_entry_signal(symbol=symbol)
+        risk_plan = self.evaluate_risk(symbol=symbol, minimum_risk_reward=minimum_risk_reward)
+        return self.checklist_engine.evaluate(
+            ChecklistInput(
+                symbol=symbol,
+                entry_trace=entry_trace,
+                risk_plan=risk_plan,
+                alignment=self.alignment_store.get(symbol),
+                runtime_metadata={
+                    "runtime_state": self.state.value,
+                    "mode": self.mode.value,
+                    "demo_data_enabled": self.demo_data_enabled,
+                },
             ),
         )
 
