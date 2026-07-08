@@ -91,6 +91,7 @@ Requirement IDs use the following prefixes:
 | ENTRY | Entry Signal Requirement |
 | RISK | Risk Requirement |
 | CHECKLIST | Checklist Requirement |
+| SCORE | Setup Scoring Requirement |
 
 Priorities:
 
@@ -572,7 +573,59 @@ Milestone: M23
 
 ---
 
-### 4.11 Future AI Decision Engine
+### 4.11 Setup Scoring Engine
+
+#### SCORE-001 — Build Setup Score
+
+Priority: High
+
+The platform shall produce a deterministic weighted setup score from existing Entry DecisionTrace, RiskPlan, ChecklistResult, multi-timeframe alignment, and optional scanner context.
+
+Milestone: M24
+
+#### SCORE-002 — Score Deterministic Components
+
+Priority: High
+
+The Setup Scoring Engine shall score trend alignment, structure/entry confirmation, risk validity/R:R, and checklist status using existing deterministic outputs only.
+
+Milestone: M24
+
+#### SCORE-003 — Penalize Weak or Invalid Context
+
+Priority: High
+
+The Setup Scoring Engine shall penalize invalidated setups, incomplete risk, failed checklist items, warnings, and missing confirmations.
+
+Milestone: M24
+
+#### SCORE-004 — Produce Grade and Summary
+
+Priority: High
+
+The Setup Scoring Engine shall produce total score, max score, percentage, grade, components, warnings, and deterministic summary.
+
+Milestone: M24
+
+#### SCORE-005 — Support API/Runtime Evaluation
+
+Priority: High
+
+The platform shall expose setup-score evaluation through backend runtime/API boundaries when available.
+
+Milestone: M24
+
+#### SCORE-006 — No Recalculation or Execution
+
+Priority: Mandatory
+
+The Setup Scoring Engine shall not calculate candles, structure, BOS, trend, entry, risk, checklist logic, AI reasoning, position size, orders, or execution decisions.
+
+Milestone: M24
+
+---
+
+### 4.12 Future AI Decision Engine
 
 #### AI-1001 — Consume Structured Market Context
 
@@ -790,6 +843,7 @@ Candle continuity, duplicate prevention, and timestamp alignment shall be testab
 | M21 | ENTRY-001 to ENTRY-006 | Entry signal engine |
 | M22 | RISK-001 to RISK-006 | Risk engine |
 | M23 | CHECKLIST-001 to CHECKLIST-006 | Checklist engine |
+| M24 | SCORE-001 to SCORE-006 | Setup scoring engine |
 
 ---
 

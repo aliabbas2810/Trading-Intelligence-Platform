@@ -13,6 +13,7 @@ from backend.api.entry import EntryDecisionResponse, EntryEvaluateRequest
 from backend.api.replay import ReplayStartRequest, ReplayStatusResponse
 from backend.api.risk import RiskEvaluateRequest, RiskPlanResponse
 from backend.api.scanner import ScannerRunRequest, ScannerSummaryResponse
+from backend.api.scoring import SetupScoreEvaluateRequest, SetupScoreResponse
 from backend.app.runtime import BackendRuntime, RuntimeState
 from backend.models import Timeframe
 
@@ -203,6 +204,16 @@ def create_app(runtime: BackendRuntime | None = None) -> FastAPI:
             minimum_risk_reward=payload.minimum_risk_reward,
         )
         return ChecklistResultResponse.from_result(result)
+
+    @app.post("/api/setup-score/evaluate")
+    def setup_score_evaluate(request: Request, payload: SetupScoreEvaluateRequest) -> object:
+        """Evaluate deterministic weighted setup score for SCORE-001 through SCORE-006."""
+
+        score = runtime_from_request(request).evaluate_setup_score(
+            symbol=payload.symbol,
+            minimum_risk_reward=payload.minimum_risk_reward,
+        )
+        return SetupScoreResponse.from_score(score)
 
     return app
 

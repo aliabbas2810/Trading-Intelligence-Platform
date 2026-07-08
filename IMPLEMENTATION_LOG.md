@@ -155,3 +155,18 @@ Implemented scope:
 - `CHECKLIST-006`: explicit exclusion of recalculating upstream analysis, AI reasoning, position sizing, and order execution.
 
 Verification: covered by backend pytest, ruff, and mypy.
+
+### M24 - Setup Scoring Engine
+
+Implemented deterministic backend setup scoring foundation that consumes Entry DecisionTrace, RiskPlan, ChecklistResult, multi-timeframe alignment, and optional scanner context.
+
+Implemented scope:
+
+- `SCORE-001`: SetupScore, ScoreComponent, ScoreGrade, and ScoringInput models.
+- `SCORE-002`: weighted trend alignment, structure/entry confirmation, risk, and checklist scoring.
+- `SCORE-003`: deterministic penalties for invalidated setups, incomplete risk, checklist failures, warnings, and missing confirmations.
+- `SCORE-004`: grade, percentage, component details, warnings, summary, and metadata.
+- `SCORE-005`: runtime/API evaluation boundary.
+- `SCORE-006`: explicit exclusion of recalculating upstream analysis, AI reasoning, position sizing, and order execution.
+
+Verification: covered by backend pytest, ruff, and mypy.
