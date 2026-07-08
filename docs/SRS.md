@@ -89,6 +89,7 @@ Requirement IDs use the following prefixes:
 | TEST | Testing Requirement |
 | AI | Artificial Intelligence Requirement |
 | ENTRY | Entry Signal Requirement |
+| RISK | Risk Requirement |
 
 Priorities:
 
@@ -466,7 +467,59 @@ Milestone: M21
 
 ---
 
-### 4.9 Future AI Decision Engine
+### 4.9 Risk Engine
+
+#### RISK-001 — Build Risk Plan
+
+Priority: High
+
+The platform shall produce a deterministic RiskPlan from an existing Entry DecisionTrace, latest completed candle/body context, structure levels, and BOS events.
+
+Milestone: M22
+
+#### RISK-002 — Determine Entry, Stop, and Target
+
+Priority: High
+
+The Risk Engine shall derive entry price from latest candle/body context, stop loss from relevant structure/invalidation levels, and take profit from a configured risk/reward target when available.
+
+Milestone: M22
+
+#### RISK-003 — Support Long and Short Plans
+
+Priority: High
+
+The Risk Engine shall support deterministic long and short risk plans without changing Entry Signal Engine semantics.
+
+Milestone: M22
+
+#### RISK-004 — Handle Inapplicable or Incomplete Inputs
+
+Priority: High
+
+The Risk Engine shall return NOT_APPLICABLE, INVALID, or INCOMPLETE when entry state, candle context, or invalidation levels do not support a valid risk plan.
+
+Milestone: M22
+
+#### RISK-005 — Produce Risk Evidence
+
+Priority: High
+
+The Risk Engine shall return deterministic reasons/evidence and warnings suitable for future checklist, replay, scoring, and AI explanation layers.
+
+Milestone: M22
+
+#### RISK-006 — No Position Sizing or Execution
+
+Priority: Mandatory
+
+The Risk Engine shall not calculate position size, execute trades, place orders, or use AI/LLM output to decide risk.
+
+Milestone: M22
+
+---
+
+### 4.10 Future AI Decision Engine
 
 #### AI-1001 — Consume Structured Market Context
 
@@ -682,6 +735,7 @@ Candle continuity, duplicate prevention, and timestamp alignment shall be testab
 | M10 | AI-1001 to AI-1003 | AI decision engine |
 | M11 | RUNTIME-001 to RUNTIME-005 | Runtime assembly |
 | M21 | ENTRY-001 to ENTRY-006 | Entry signal engine |
+| M22 | RISK-001 to RISK-006 | Risk engine |
 
 ---
 

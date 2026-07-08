@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.api.ai import AiDecisionRequest, AiDecisionResponse
 from backend.api.entry import EntryDecisionResponse, EntryEvaluateRequest
 from backend.api.replay import ReplayStartRequest, ReplayStatusResponse
+from backend.api.risk import RiskEvaluateRequest, RiskPlanResponse
 from backend.api.scanner import ScannerRunRequest, ScannerSummaryResponse
 from backend.app.runtime import BackendRuntime, RuntimeState
 from backend.models import Timeframe
@@ -180,6 +181,17 @@ def create_app(runtime: BackendRuntime | None = None) -> FastAPI:
 
         trace = runtime_from_request(request).evaluate_entry_signal(symbol=payload.symbol)
         return EntryDecisionResponse.from_trace(trace)
+
+    @app.post("/api/risk/evaluate")
+    def risk_evaluate(request: Request, payload: RiskEvaluateRequest) -> object:
+        """Evaluate deterministic risk plan for RISK-001 through RISK-006."""
+
+        plan = runtime_from_request(request).evaluate_risk(
+            symbol=payload.symbol,
+            minimum_risk_reward=payload.minimum_risk_reward,
+            target_mode=payload.target_mode,
+        )
+        return RiskPlanResponse.from_plan(plan)
 
     return app
 

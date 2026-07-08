@@ -125,3 +125,18 @@ Constraints:
 - Do not recalculate candles, structure, trend, scanner score, or AI context inside the entry engine.
 
 Verification target: focused deterministic unit tests for each state, missing-data behavior, bullish/bearish setup symmetry, BOS/body-level gating, invalidation, and replay consistency.
+
+### M22 - Risk Engine
+
+Implemented deterministic backend risk-plan foundation that consumes Entry DecisionTrace, latest candle/body context, structure levels, BOS events, and optional R:R target settings.
+
+Implemented scope:
+
+- `RISK-001`: RiskPlan model and deterministic risk plan output.
+- `RISK-002`: entry, stop, take-profit, invalidation level, and R:R derivation.
+- `RISK-003`: long and short risk plan support.
+- `RISK-004`: NOT_APPLICABLE, INVALID, and INCOMPLETE handling for unsuitable inputs.
+- `RISK-005`: typed risk evidence, readable reasons, and warnings.
+- `RISK-006`: explicit exclusion of position sizing, order execution, AI risk decisions, and recalculation of upstream logic.
+
+Verification: covered by backend pytest, ruff, and mypy.

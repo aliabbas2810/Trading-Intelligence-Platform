@@ -560,6 +560,33 @@ def test_entry_evaluate_endpoint_returns_decision_trace() -> None:
     assert payload["metadata"]["alignment_score"] == 3
 
 
+def test_risk_evaluate_endpoint_returns_risk_plan() -> None:
+    """Covers RISK-001 through RISK-006 and TEST-001."""
+
+    runtime = BackendRuntime(settings=demo_disabled_settings(), mode=RuntimeMode.DRY_RUN)
+    seed_entry_ready_symbol(runtime, "BTCUSDT")
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/risk/evaluate",
+            json={"symbol": "BTCUSDT", "minimum_risk_reward": 2.0},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["direction"] == "LONG"
+    assert payload["state"] == "VALID"
+    assert payload["entry_price"] == 105.0
+    assert payload["stop_loss"] == 95.0
+    assert payload["take_profit"] == 125.0
+    assert payload["risk_reward_ratio"] == 2.0
+    assert {item["code"] for item in payload["evidence"]} >= {
+        "entry_price_from_latest_close",
+        "stop_from_structure_level",
+        "risk_reward_calculated",
+    }
+
+
 def test_cli_can_run_api_mode_without_starting_server(monkeypatch: pytest.MonkeyPatch) -> None:
     """Covers local API CLI wiring for RUNTIME-001 and TEST-001."""
 
@@ -586,6 +613,7 @@ def test_api_layer_does_not_recompute_analysis_logic() -> None:
             Path("backend/api/service.py").read_text(encoding="utf-8"),
             Path("backend/api/ai.py").read_text(encoding="utf-8"),
             Path("backend/api/entry.py").read_text(encoding="utf-8"),
+            Path("backend/api/risk.py").read_text(encoding="utf-8"),
         ),
     )
 
@@ -688,6 +716,104 @@ def seed_scanner_symbol(
             low=90.0,
             close=125.0,
             volume=10.0,
+        ),
+    )
+
+
+def seed_entry_ready_symbol(runtime: BackendRuntime, symbol: str) -> None:
+    trend_updates = tuple(
+        TrendUpdate(
+            symbol=symbol,
+            timeframe=timeframe,
+            state=TrendState.BULLISH,
+            previous_state=None,
+            strength=TrendStrength(confirming_structure_count=3),
+            reason="entry-ready-test",
+            event_time_ms=120_000,
+        )
+        for timeframe in (
+            Timeframe.WEEKLY,
+            Timeframe.DAILY,
+            Timeframe.FOUR_HOUR,
+            Timeframe.TWO_HOUR,
+            Timeframe.ONE_HOUR,
+            Timeframe.THIRTY_MINUTE,
+        )
+    )
+    for update in trend_updates:
+        runtime.trend_store.set(update)
+
+    runtime.alignment_store.set(
+        MultiTimeframeTrendResult(
+            symbol=symbol,
+            mode=MultiTimeframeMode.VOTING,
+            bias=DirectionalBias.BULLISH,
+            alignment_score=3,
+            required_timeframes=(Timeframe.WEEKLY, Timeframe.DAILY, Timeframe.FOUR_HOUR),
+            present_timeframes=(Timeframe.WEEKLY, Timeframe.DAILY, Timeframe.FOUR_HOUR),
+            missing_timeframes=(),
+            snapshots=tuple(
+                TimeframeTrendSnapshot(
+                    symbol=update.symbol,
+                    timeframe=update.timeframe,
+                    state=update.state,
+                    strength=update.strength,
+                    event_time_ms=update.event_time_ms,
+                )
+                for update in trend_updates
+                if update.timeframe in {Timeframe.WEEKLY, Timeframe.DAILY, Timeframe.FOUR_HOUR}
+            ),
+            reason="entry-ready-test",
+        ),
+    )
+
+    for timeframe in (Timeframe.FIFTEEN_MINUTE, Timeframe.FIVE_MINUTE, Timeframe.ONE_MINUTE):
+        runtime.structure_store.add_swing(
+            StructureSwing(
+                symbol=symbol,
+                timeframe=timeframe,
+                kind=SwingKind.HIGH,
+                label=StructureLabel.HH,
+                level=115.0,
+                candle_open_time_ms=0,
+                candle_close_time_ms=60_000,
+            ),
+        )
+        runtime.structure_store.add_swing(
+            StructureSwing(
+                symbol=symbol,
+                timeframe=timeframe,
+                kind=SwingKind.LOW,
+                label=StructureLabel.HL,
+                level=95.0,
+                candle_open_time_ms=60_000,
+                candle_close_time_ms=120_000,
+            ),
+        )
+        runtime.structure_store.add_break_of_structure(
+            BreakOfStructure(
+                symbol=symbol,
+                timeframe=timeframe,
+                direction=BreakDirection.BULLISH,
+                broken_label=StructureLabel.HH,
+                broken_level=115.0,
+                candle_close=116.0,
+                candle_open_time_ms=120_000,
+                candle_close_time_ms=180_000,
+            ),
+        )
+
+    runtime.candle_store.save(
+        Candle(
+            symbol=symbol,
+            timeframe=Timeframe.ONE_MINUTE,
+            open_time_ms=180_000,
+            close_time_ms=240_000,
+            open=104.0,
+            high=106.0,
+            low=103.0,
+            close=105.0,
+            volume=1.0,
         ),
     )
 

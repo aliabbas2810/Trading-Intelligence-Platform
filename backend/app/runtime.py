@@ -18,8 +18,9 @@ from backend.core import EventBus, configure_logging, get_logger
 from backend.engines.ai import AiDecisionEngine, AiDecisionInput, AiDecisionOutput, RuleBasedMockAiDecisionProvider
 from backend.engines.entry import DecisionTrace, EntrySignalEngine, EntrySignalInput
 from backend.engines.replay import HistoricalTradeReplaySource, ReplayController
+from backend.engines.risk import RiskEngine, RiskInput, RiskPlan
 from backend.engines.scanner import ScannerEngine, ScannerSummary, SetupCandidate, SymbolScanInput
-from backend.engines.structure import MarketStructureEngine, StructureEvent
+from backend.engines.structure import BreakOfStructure, MarketStructureEngine, StructureEvent, StructureSwing
 from backend.engines.trend import (
     DirectionalBias,
     MultiTimeframeTrendAggregatedEvent,
@@ -160,6 +161,7 @@ class BackendRuntime:
         self._scanner_summary: ScannerSummary | None = None
         self.ai_decision_engine = AiDecisionEngine(RuleBasedMockAiDecisionProvider())
         self.entry_signal_engine = EntrySignalEngine()
+        self.risk_engine = RiskEngine()
         self.replay_controller = ReplayController(
             self.event_bus,
             HistoricalTradeReplaySource(()),
@@ -231,6 +233,7 @@ class BackendRuntime:
             ComponentHealth("scanner", status, "scanner foundation ready"),
             ComponentHealth("ai_decision_engine", status, "mock provider ready"),
             ComponentHealth("entry_signal_engine", status, "deterministic entry-state foundation ready"),
+            ComponentHealth("risk_engine", status, "deterministic risk foundation ready"),
             ComponentHealth("visualization_api", status, "read-only API boundary ready"),
             ComponentHealth(
                 "demo_data",
@@ -301,6 +304,7 @@ class BackendRuntime:
         )
         self.multi_timeframe_aggregator = MultiTimeframeTrendAggregator()
         self.entry_signal_engine = EntrySignalEngine()
+        self.risk_engine = RiskEngine()
         self._structure_engines = {}
         self._trend_engines = {}
         self._trend_snapshots = {}
@@ -368,6 +372,26 @@ class BackendRuntime:
         """Evaluate entry state from existing stores for ENTRY-001 through ENTRY-006."""
 
         return self.entry_signal_engine.evaluate(self._entry_signal_input_for(symbol))
+
+    def evaluate_risk(
+        self,
+        *,
+        symbol: str,
+        minimum_risk_reward: float | None = 2.0,
+        target_mode: str | None = "rr",
+    ) -> RiskPlan:
+        """Evaluate risk from existing deterministic outputs for RISK-001 through RISK-006."""
+
+        return self.risk_engine.evaluate(
+            RiskInput(
+                entry_trace=self.evaluate_entry_signal(symbol=symbol),
+                latest_candle=self._latest_candle(symbol, Timeframe.ONE_MINUTE),
+                structure_levels=self._risk_structure_levels(symbol),
+                bos_events=self._risk_bos_events(symbol),
+                minimum_risk_reward=minimum_risk_reward,
+                target_mode=target_mode,
+            ),
+        )
 
     def _subscribe_components(self) -> None:
         if self._subscribed:
@@ -564,6 +588,24 @@ class BackendRuntime:
             ),
             latest_candle=one_minute_candles[-1] if one_minute_candles else None,
             alignment=self.alignment_store.get(symbol),
+        )
+
+    def _latest_candle(self, symbol: str, timeframe: Timeframe) -> Candle | None:
+        candles = self.candle_store.list(symbol, timeframe)
+        return candles[-1] if candles else None
+
+    def _risk_structure_levels(self, symbol: str) -> tuple[StructureSwing, ...]:
+        return tuple(
+            swing
+            for timeframe in (Timeframe.FIFTEEN_MINUTE, Timeframe.FIVE_MINUTE, Timeframe.ONE_MINUTE)
+            for swing in self.structure_store.list(symbol, timeframe).swings
+        )
+
+    def _risk_bos_events(self, symbol: str) -> tuple[BreakOfStructure, ...]:
+        return tuple(
+            event
+            for timeframe in (Timeframe.FIFTEEN_MINUTE, Timeframe.FIVE_MINUTE, Timeframe.ONE_MINUTE)
+            for event in self.structure_store.list(symbol, timeframe).breaks_of_structure
         )
 
     def _latest_setup_candidate(self, symbol: str) -> SetupCandidate | None:

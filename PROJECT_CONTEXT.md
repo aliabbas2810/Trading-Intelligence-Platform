@@ -45,6 +45,7 @@ TIP is organized around pipelines and engines:
 - `backend/engines/trend/`: trend classification and multi-timeframe trend aggregation.
 - `backend/engines/replay/`: replay sources and controller that reuse the event bus.
 - `backend/engines/scanner/`: setup candidate scoring and ranking from existing snapshots.
+- `backend/engines/risk/`: deterministic risk plan foundation from entry traces, candles, and structure levels.
 - `backend/engines/ai/`: structured AI decision foundation with provider abstraction and mock provider.
 - `backend/api/`: read-only visualization API boundaries over existing stores/snapshots.
 - `frontend/`: React + Lightweight Charts visualization shell and contract tests.
@@ -70,7 +71,7 @@ TIP is organized around pipelines and engines:
 
 ## Current Capability Snapshot
 
-The backend can normalize trades, build and persist candles, aggregate higher timeframes, detect body-based structure, classify trends, aggregate multi-timeframe trend state, expose local API endpoints, replay historical events through deterministic replay components, drive non-destructive chart replay with a cursor, scan existing outputs for ranked setup candidates, and produce structured mock AI decision outputs.
+The backend can normalize trades, build and persist candles, aggregate higher timeframes, detect body-based structure, classify trends, aggregate multi-timeframe trend state, expose local API endpoints, replay historical events through deterministic replay components, drive non-destructive chart replay with a cursor, scan existing outputs for ranked setup candidates, classify entry state, produce deterministic risk plans, and produce structured mock AI decision outputs.
 
 The frontend can render backend-provided candles, structure overlays, BOS overlays, trend background/ribbon state, replay cursor controls, scanner results, and timeframe/symbol controls. It does not calculate market structure, trend, scanner score, or entry logic.
 
