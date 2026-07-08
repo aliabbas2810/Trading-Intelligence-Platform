@@ -170,3 +170,18 @@ Implemented scope:
 - `SCORE-006`: explicit exclusion of recalculating upstream analysis, AI reasoning, position sizing, and order execution.
 
 Verification: covered by backend pytest, ruff, and mypy.
+
+### M25 - Trading Intelligence API Consolidation
+
+Implemented one backend orchestration API that returns the full trading intelligence chain for a symbol.
+
+Implemented scope:
+
+- `INTEL-001`: consolidated TradingIntelligenceResult and API response with entry, risk, checklist, setup score, AI decision, and metadata.
+- `INTEL-002`: ordered runtime orchestration: entry -> risk -> checklist -> score -> AI.
+- `INTEL-003`: reuse of existing runtime/engine boundaries without duplicating deterministic logic.
+- `INTEL-004`: AI decision generated from structured outputs and existing runtime stores.
+- `INTEL-005`: graceful missing-data response through existing WAIT/NOT_APPLICABLE/MISSING/low-score behavior.
+- `INTEL-006`: no order execution, real LLM integration, API keys, external services, or new trading rules.
+
+Verification: covered by backend pytest, ruff, and mypy.

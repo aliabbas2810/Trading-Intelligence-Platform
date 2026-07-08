@@ -669,6 +669,7 @@ def test_api_layer_does_not_recompute_analysis_logic() -> None:
             Path("backend/api/risk.py").read_text(encoding="utf-8"),
             Path("backend/api/checklist.py").read_text(encoding="utf-8"),
             Path("backend/api/scoring.py").read_text(encoding="utf-8"),
+            Path("backend/api/trading_intelligence.py").read_text(encoding="utf-8"),
         ),
     )
 

@@ -92,6 +92,7 @@ Requirement IDs use the following prefixes:
 | RISK | Risk Requirement |
 | CHECKLIST | Checklist Requirement |
 | SCORE | Setup Scoring Requirement |
+| INTEL | Trading Intelligence Requirement |
 
 Priorities:
 
@@ -625,7 +626,59 @@ Milestone: M24
 
 ---
 
-### 4.12 Future AI Decision Engine
+### 4.12 Trading Intelligence API
+
+#### INTEL-001 — Consolidate Trading Intelligence
+
+Priority: High
+
+The platform shall expose one backend orchestration result containing entry decision, risk plan, checklist result, setup score, AI decision output, and runtime metadata for a symbol.
+
+Milestone: M25
+
+#### INTEL-002 — Preserve Engine Execution Order
+
+Priority: High
+
+Trading intelligence orchestration shall evaluate existing outputs in this order: entry, risk, checklist, setup score, then AI decision.
+
+Milestone: M25
+
+#### INTEL-003 — Reuse Existing Deterministic Engines
+
+Priority: Mandatory
+
+Trading intelligence orchestration shall call existing runtime/engine boundaries and shall not duplicate Entry, Risk, Checklist, Scoring, Scanner, Structure, Trend, or AI logic.
+
+Milestone: M25
+
+#### INTEL-004 — Include AI Decision From Structured Outputs
+
+Priority: High
+
+The AI decision in the consolidated response shall be generated from structured deterministic outputs and existing runtime stores, not raw chart data or recalculated analysis.
+
+Milestone: M25
+
+#### INTEL-005 — Handle Missing Data Gracefully
+
+Priority: High
+
+The consolidated endpoint shall return structured WAIT, NOT_APPLICABLE, MISSING, low-score, or avoid/watch-style outputs when data is missing rather than failing.
+
+Milestone: M25
+
+#### INTEL-006 — No Execution or External Services
+
+Priority: Mandatory
+
+The consolidated Trading Intelligence API shall not execute trades, place orders, add API keys, call external services, integrate a real LLM provider, or implement new trading rules.
+
+Milestone: M25
+
+---
+
+### 4.13 Future AI Decision Engine
 
 #### AI-1001 — Consume Structured Market Context
 
@@ -844,6 +897,7 @@ Candle continuity, duplicate prevention, and timestamp alignment shall be testab
 | M22 | RISK-001 to RISK-006 | Risk engine |
 | M23 | CHECKLIST-001 to CHECKLIST-006 | Checklist engine |
 | M24 | SCORE-001 to SCORE-006 | Setup scoring engine |
+| M25 | INTEL-001 to INTEL-006 | Trading intelligence API consolidation |
 
 ---
 

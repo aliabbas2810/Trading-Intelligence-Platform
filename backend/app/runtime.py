@@ -18,6 +18,7 @@ from backend.core import EventBus, configure_logging, get_logger
 from backend.engines.ai import AiDecisionEngine, AiDecisionInput, AiDecisionOutput, RuleBasedMockAiDecisionProvider
 from backend.engines.checklist import ChecklistEngine, ChecklistInput, ChecklistResult
 from backend.engines.entry import DecisionTrace, EntrySignalEngine, EntrySignalInput
+from backend.engines.intelligence import TradingIntelligenceResult
 from backend.engines.replay import HistoricalTradeReplaySource, ReplayController
 from backend.engines.risk import RiskEngine, RiskInput, RiskPlan
 from backend.engines.scanner import ScannerEngine, ScannerSummary, SetupCandidate, SymbolScanInput
@@ -387,12 +388,13 @@ class BackendRuntime:
         symbol: str,
         minimum_risk_reward: float | None = 2.0,
         target_mode: str | None = "rr",
+        entry_trace: DecisionTrace | None = None,
     ) -> RiskPlan:
         """Evaluate risk from existing deterministic outputs for RISK-001 through RISK-006."""
 
         return self.risk_engine.evaluate(
             RiskInput(
-                entry_trace=self.evaluate_entry_signal(symbol=symbol),
+                entry_trace=entry_trace or self.evaluate_entry_signal(symbol=symbol),
                 latest_candle=self._latest_candle(symbol, Timeframe.ONE_MINUTE),
                 structure_levels=self._risk_structure_levels(symbol),
                 bos_events=self._risk_bos_events(symbol),
@@ -406,11 +408,17 @@ class BackendRuntime:
         *,
         symbol: str,
         minimum_risk_reward: float | None = 2.0,
+        entry_trace: DecisionTrace | None = None,
+        risk_plan: RiskPlan | None = None,
     ) -> ChecklistResult:
         """Evaluate checklist from existing entry/risk evidence for CHECKLIST-001 through CHECKLIST-006."""
 
-        entry_trace = self.evaluate_entry_signal(symbol=symbol)
-        risk_plan = self.evaluate_risk(symbol=symbol, minimum_risk_reward=minimum_risk_reward)
+        entry_trace = entry_trace or self.evaluate_entry_signal(symbol=symbol)
+        risk_plan = risk_plan or self.evaluate_risk(
+            symbol=symbol,
+            minimum_risk_reward=minimum_risk_reward,
+            entry_trace=entry_trace,
+        )
         return self.checklist_engine.evaluate(
             ChecklistInput(
                 symbol=symbol,
@@ -430,12 +438,24 @@ class BackendRuntime:
         *,
         symbol: str,
         minimum_risk_reward: float | None = 2.0,
+        entry_trace: DecisionTrace | None = None,
+        risk_plan: RiskPlan | None = None,
+        checklist_result: ChecklistResult | None = None,
     ) -> SetupScore:
         """Evaluate weighted setup score from existing outputs for SCORE-001 through SCORE-006."""
 
-        entry_trace = self.evaluate_entry_signal(symbol=symbol)
-        risk_plan = self.evaluate_risk(symbol=symbol, minimum_risk_reward=minimum_risk_reward)
-        checklist_result = self.evaluate_checklist(symbol=symbol, minimum_risk_reward=minimum_risk_reward)
+        entry_trace = entry_trace or self.evaluate_entry_signal(symbol=symbol)
+        risk_plan = risk_plan or self.evaluate_risk(
+            symbol=symbol,
+            minimum_risk_reward=minimum_risk_reward,
+            entry_trace=entry_trace,
+        )
+        checklist_result = checklist_result or self.evaluate_checklist(
+            symbol=symbol,
+            minimum_risk_reward=minimum_risk_reward,
+            entry_trace=entry_trace,
+            risk_plan=risk_plan,
+        )
         return self.setup_scoring_engine.evaluate(
             ScoringInput(
                 symbol=symbol,
@@ -449,6 +469,60 @@ class BackendRuntime:
                     "mode": self.mode.value,
                 },
             ),
+        )
+
+    def evaluate_trading_intelligence(
+        self,
+        *,
+        symbol: str,
+        timeframe: Timeframe = Timeframe.FOUR_HOUR,
+        minimum_risk_reward: float | None = 2.0,
+    ) -> TradingIntelligenceResult:
+        """Run ordered trading intelligence orchestration for INTEL-001 through INTEL-006."""
+
+        entry_trace = self.evaluate_entry_signal(symbol=symbol)
+        risk_plan = self.evaluate_risk(
+            symbol=symbol,
+            minimum_risk_reward=minimum_risk_reward,
+            entry_trace=entry_trace,
+        )
+        checklist_result = self.evaluate_checklist(
+            symbol=symbol,
+            minimum_risk_reward=minimum_risk_reward,
+            entry_trace=entry_trace,
+            risk_plan=risk_plan,
+        )
+        setup_score = self.evaluate_setup_score(
+            symbol=symbol,
+            minimum_risk_reward=minimum_risk_reward,
+            entry_trace=entry_trace,
+            risk_plan=risk_plan,
+            checklist_result=checklist_result,
+        )
+        ai_decision = self.generate_ai_decision(
+            symbol=symbol,
+            timeframe=timeframe,
+            entry_signal=f"{entry_trace.state.value}:{entry_trace.direction.value}",
+            risk_reward=(
+                f"risk_state={risk_plan.state.value};"
+                f"rr={risk_plan.risk_reward_ratio};"
+                f"score={setup_score.grade.value}:{setup_score.percentage:.2f}"
+            ),
+        )
+        return TradingIntelligenceResult(
+            symbol=symbol,
+            timeframe=timeframe,
+            entry_decision=entry_trace,
+            risk_plan=risk_plan,
+            checklist=checklist_result,
+            setup_score=setup_score,
+            ai_decision=ai_decision,
+            metadata={
+                "execution_order": "entry,risk,checklist,score,ai",
+                "runtime_state": self.state.value,
+                "mode": self.mode.value,
+                "minimum_risk_reward": minimum_risk_reward,
+            },
         )
 
     def _subscribe_components(self) -> None:

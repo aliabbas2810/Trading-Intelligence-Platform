@@ -48,6 +48,7 @@ TIP is organized around pipelines and engines:
 - `backend/engines/checklist/`: deterministic checklist results from entry/risk typed evidence.
 - `backend/engines/risk/`: deterministic risk plan foundation from entry traces, candles, and structure levels.
 - `backend/engines/scoring/`: deterministic weighted setup scoring from entry, risk, checklist, alignment, and optional scanner context.
+- `backend/engines/intelligence/`: consolidated trading-intelligence result model for ordered orchestration.
 - `backend/engines/ai/`: structured AI decision foundation with provider abstraction and mock provider.
 - `backend/api/`: read-only visualization API boundaries over existing stores/snapshots.
 - `frontend/`: React + Lightweight Charts visualization shell and contract tests.
@@ -73,7 +74,7 @@ TIP is organized around pipelines and engines:
 
 ## Current Capability Snapshot
 
-The backend can normalize trades, build and persist candles, aggregate higher timeframes, detect body-based structure, classify trends, aggregate multi-timeframe trend state, expose local API endpoints, replay historical events through deterministic replay components, drive non-destructive chart replay with a cursor, scan existing outputs for ranked setup candidates, classify entry state, produce deterministic risk plans, produce evidence-driven checklists, produce weighted setup scores, and produce structured mock AI decision outputs.
+The backend can normalize trades, build and persist candles, aggregate higher timeframes, detect body-based structure, classify trends, aggregate multi-timeframe trend state, expose local API endpoints, replay historical events through deterministic replay components, drive non-destructive chart replay with a cursor, scan existing outputs for ranked setup candidates, classify entry state, produce deterministic risk plans, produce evidence-driven checklists, produce weighted setup scores, return consolidated trading-intelligence chains, and produce structured mock AI decision outputs.
 
 The frontend can render backend-provided candles, structure overlays, BOS overlays, trend background/ribbon state, replay cursor controls, scanner results, and timeframe/symbol controls. It does not calculate market structure, trend, scanner score, or entry logic.
 

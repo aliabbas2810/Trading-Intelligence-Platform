@@ -14,6 +14,7 @@ from backend.api.replay import ReplayStartRequest, ReplayStatusResponse
 from backend.api.risk import RiskEvaluateRequest, RiskPlanResponse
 from backend.api.scanner import ScannerRunRequest, ScannerSummaryResponse
 from backend.api.scoring import SetupScoreEvaluateRequest, SetupScoreResponse
+from backend.api.trading_intelligence import TradingIntelligenceRequest, TradingIntelligenceResponse
 from backend.app.runtime import BackendRuntime, RuntimeState
 from backend.models import Timeframe
 
@@ -214,6 +215,17 @@ def create_app(runtime: BackendRuntime | None = None) -> FastAPI:
             minimum_risk_reward=payload.minimum_risk_reward,
         )
         return SetupScoreResponse.from_score(score)
+
+    @app.post("/api/trading-intelligence/evaluate")
+    def trading_intelligence_evaluate(request: Request, payload: TradingIntelligenceRequest) -> object:
+        """Evaluate the full trading intelligence chain for INTEL-001 through INTEL-006."""
+
+        result = runtime_from_request(request).evaluate_trading_intelligence(
+            symbol=payload.symbol,
+            timeframe=payload.timeframe,
+            minimum_risk_reward=payload.minimum_risk_reward,
+        )
+        return TradingIntelligenceResponse.from_result(result)
 
     return app
 
