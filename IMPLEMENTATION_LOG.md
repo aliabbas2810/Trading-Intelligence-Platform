@@ -91,3 +91,37 @@ Constraints:
 - Do not add order execution.
 
 Verification target: backend tests, lint, typecheck, and focused runtime assembly integration tests.
+
+## Phase 3 - Trading Intelligence
+
+### Planned M21 - Entry Signal Engine
+
+Goal: classify deterministic setup state from existing trend, structure, BOS, candle/body, and multi-timeframe alignment outputs.
+
+Planned states:
+
+- `WAIT`
+- `WATCH`
+- `LONG_SETUP`
+- `SHORT_SETUP`
+- `ENTRY_READY`
+- `INVALIDATED`
+
+Planned scope:
+
+- `ENTRY-001`: entry state classification.
+- `ENTRY-002`: consume 1W, 1D, 4H, 2H, 1H, and 30M trend outputs.
+- `ENTRY-003`: consume 15M, 5M, and 1M structure/BOS outputs.
+- `ENTRY-004`: consume latest completed candle and candle body context.
+- `ENTRY-005`: emit deterministic reasons/explanations.
+- `ENTRY-006`: explicitly exclude order execution, position sizing, and AI-driven structure decisions.
+
+Constraints:
+
+- Do not execute trades.
+- Do not calculate position size.
+- Do not place orders.
+- Do not use AI to determine market structure.
+- Do not recalculate candles, structure, trend, scanner score, or AI context inside the entry engine.
+
+Verification target: focused deterministic unit tests for each state, missing-data behavior, bullish/bearish setup symmetry, BOS/body-level gating, invalidation, and replay consistency.

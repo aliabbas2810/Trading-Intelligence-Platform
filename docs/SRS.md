@@ -88,6 +88,7 @@ Requirement IDs use the following prefixes:
 | DEP | Deployment Requirement |
 | TEST | Testing Requirement |
 | AI | Artificial Intelligence Requirement |
+| ENTRY | Entry Signal Requirement |
 
 Priorities:
 
@@ -413,7 +414,59 @@ Milestone: M8
 
 ---
 
-### 4.8 Future AI Decision Engine
+### 4.8 Entry Signal Engine
+
+#### ENTRY-001 — Classify Entry State
+
+Priority: High
+
+The platform shall classify each evaluated symbol/timeframe context as one of: WAIT, WATCH, LONG_SETUP, SHORT_SETUP, ENTRY_READY, or INVALIDATED.
+
+Milestone: M21
+
+#### ENTRY-002 — Consume Multi-Timeframe Trend Inputs
+
+Priority: High
+
+The Entry Signal Engine shall consume existing 1W, 1D, 4H, 2H, 1H, and 30M trend outputs without recalculating trend or structure.
+
+Milestone: M21
+
+#### ENTRY-003 — Consume Lower-Timeframe Structure Inputs
+
+Priority: High
+
+The Entry Signal Engine shall consume existing 15M, 5M, and 1M market-structure outputs, including HH, HL, LH, LL, and BOS events.
+
+Milestone: M21
+
+#### ENTRY-004 — Use Candle Body Context
+
+Priority: High
+
+The Entry Signal Engine shall consume latest completed candles and body levels as structured inputs while preserving the rule that market structure is body-based.
+
+Milestone: M21
+
+#### ENTRY-005 — Produce Deterministic Explanations
+
+Priority: High
+
+The Entry Signal Engine shall return deterministic reasons for each state using existing analytical outputs such as trend alignment, BOS presence, structure state, and latest candle/body context.
+
+Milestone: M21
+
+#### ENTRY-006 — No Trade Execution
+
+Priority: Mandatory
+
+The Entry Signal Engine shall not execute trades, calculate position size, place orders, or use AI/LLM output to decide market structure.
+
+Milestone: M21
+
+---
+
+### 4.9 Future AI Decision Engine
 
 #### AI-1001 — Consume Structured Market Context
 
@@ -628,6 +681,7 @@ Candle continuity, duplicate prevention, and timestamp alignment shall be testab
 | M9 | FR-104 | Multi-symbol scanner |
 | M10 | AI-1001 to AI-1003 | AI decision engine |
 | M11 | RUNTIME-001 to RUNTIME-005 | Runtime assembly |
+| M21 | ENTRY-001 to ENTRY-006 | Entry signal engine |
 
 ---
 

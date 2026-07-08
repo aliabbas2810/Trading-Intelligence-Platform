@@ -16,6 +16,7 @@ from backend.api import (
 from backend.config import PlatformSettings, load_settings
 from backend.core import EventBus, configure_logging, get_logger
 from backend.engines.ai import AiDecisionEngine, AiDecisionInput, AiDecisionOutput, RuleBasedMockAiDecisionProvider
+from backend.engines.entry import DecisionTrace, EntrySignalEngine, EntrySignalInput
 from backend.engines.replay import HistoricalTradeReplaySource, ReplayController
 from backend.engines.scanner import ScannerEngine, ScannerSummary, SetupCandidate, SymbolScanInput
 from backend.engines.structure import MarketStructureEngine, StructureEvent
@@ -158,6 +159,7 @@ class BackendRuntime:
         self.scanner = ScannerEngine(self.event_bus)
         self._scanner_summary: ScannerSummary | None = None
         self.ai_decision_engine = AiDecisionEngine(RuleBasedMockAiDecisionProvider())
+        self.entry_signal_engine = EntrySignalEngine()
         self.replay_controller = ReplayController(
             self.event_bus,
             HistoricalTradeReplaySource(()),
@@ -228,6 +230,7 @@ class BackendRuntime:
             ComponentHealth("replay_engine", status, self._replay_component_message()),
             ComponentHealth("scanner", status, "scanner foundation ready"),
             ComponentHealth("ai_decision_engine", status, "mock provider ready"),
+            ComponentHealth("entry_signal_engine", status, "deterministic entry-state foundation ready"),
             ComponentHealth("visualization_api", status, "read-only API boundary ready"),
             ComponentHealth(
                 "demo_data",
@@ -297,6 +300,7 @@ class BackendRuntime:
             alignment_store=self.alignment_store,
         )
         self.multi_timeframe_aggregator = MultiTimeframeTrendAggregator()
+        self.entry_signal_engine = EntrySignalEngine()
         self._structure_engines = {}
         self._trend_engines = {}
         self._trend_snapshots = {}
@@ -359,6 +363,11 @@ class BackendRuntime:
             risk_reward=risk_reward,
         )
         return self.ai_decision_engine.generate_decision(decision_input)
+
+    def evaluate_entry_signal(self, *, symbol: str) -> DecisionTrace:
+        """Evaluate entry state from existing stores for ENTRY-001 through ENTRY-006."""
+
+        return self.entry_signal_engine.evaluate(self._entry_signal_input_for(symbol))
 
     def _subscribe_components(self) -> None:
         if self._subscribed:
@@ -529,6 +538,32 @@ class BackendRuntime:
             structure_swings=structure.swings,
             breaks_of_structure=structure.breaks_of_structure,
             latest_candle=candles[-1] if candles else None,
+        )
+
+    def _entry_signal_input_for(self, symbol: str) -> EntrySignalInput:
+        structures = {
+            timeframe: self.structure_store.list(symbol, timeframe)
+            for timeframe in (Timeframe.FIFTEEN_MINUTE, Timeframe.FIVE_MINUTE, Timeframe.ONE_MINUTE)
+        }
+        one_minute_candles = self.candle_store.list(symbol, Timeframe.ONE_MINUTE)
+        return EntrySignalInput(
+            symbol=symbol,
+            trend_1w=self.trend_store.get(symbol, Timeframe.WEEKLY).update,
+            trend_1d=self.trend_store.get(symbol, Timeframe.DAILY).update,
+            trend_4h=self.trend_store.get(symbol, Timeframe.FOUR_HOUR).update,
+            trend_2h=self.trend_store.get(symbol, Timeframe.TWO_HOUR).update,
+            trend_1h=self.trend_store.get(symbol, Timeframe.ONE_HOUR).update,
+            trend_30m=self.trend_store.get(symbol, Timeframe.THIRTY_MINUTE).update,
+            structure_15m=structures[Timeframe.FIFTEEN_MINUTE],
+            structure_5m=structures[Timeframe.FIVE_MINUTE],
+            structure_1m=structures[Timeframe.ONE_MINUTE],
+            bos_events=tuple(
+                event
+                for structure in structures.values()
+                for event in structure.breaks_of_structure
+            ),
+            latest_candle=one_minute_candles[-1] if one_minute_candles else None,
+            alignment=self.alignment_store.get(symbol),
         )
 
     def _latest_setup_candidate(self, symbol: str) -> SetupCandidate | None:

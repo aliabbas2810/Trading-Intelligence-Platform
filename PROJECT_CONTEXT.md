@@ -6,7 +6,7 @@ Trading Intelligence Platform (TIP)
 
 ## Current Development Phase
 
-Phase 2 planning for v0.2.0 Runtime Assembly.
+Phase 3 planning for Trading Intelligence.
 
 ## What We Are Building
 
@@ -28,6 +28,7 @@ The platform starts with Binance Spot trade data and BTCUSDT, but the backend no
 | M8 | Completed | Replay engine that publishes historical events through the same event bus path as live mode. |
 | M9 | Completed | Backend scanner foundation that ranks existing multi-symbol analytical outputs. |
 | M10 | Completed | Backend AI decision engine foundation with structured input and deterministic mock provider. |
+| M11-M20 | Completed | Runtime/API/frontend stabilization through local runnable backend, live Binance mode wiring, API service, visualization data connection, demo data, replay controls, scanner API/UI, AI decision API, and non-destructive chart replay cursor. |
 
 ## Current Architecture
 
@@ -69,25 +70,29 @@ TIP is organized around pipelines and engines:
 
 ## Current Capability Snapshot
 
-The backend can normalize trades, build and persist candles, aggregate higher timeframes, detect body-based structure, classify trends, aggregate multi-timeframe trend state, replay historical trades/candles through the event bus, scan existing outputs for ranked setup candidates, and produce structured mock AI decision outputs.
+The backend can normalize trades, build and persist candles, aggregate higher timeframes, detect body-based structure, classify trends, aggregate multi-timeframe trend state, expose local API endpoints, replay historical events through deterministic replay components, drive non-destructive chart replay with a cursor, scan existing outputs for ranked setup candidates, and produce structured mock AI decision outputs.
 
-The frontend can render backend-provided candles, structure overlays, BOS overlays, trend background/ribbon state, and timeframe/symbol controls. It does not calculate market structure or trend logic.
+The frontend can render backend-provided candles, structure overlays, BOS overlays, trend background/ribbon state, replay cursor controls, scanner results, and timeframe/symbol controls. It does not calculate market structure, trend, scanner score, or entry logic.
 
 ## Next Recommended Phase
 
-Recommended next phase: v0.2.0 Runtime Assembly.
+Recommended next phase: Phase 3 Trading Intelligence.
 
-Goal: turn the existing M1-M10 components into a runnable local backend application without adding new trading logic.
+Goal: add deterministic setup-state classification on top of the completed market data, candle, structure, trend, replay, scanner, visualization, and AI foundations.
 
-Suggested priorities:
+Planned M21: Entry Signal Engine.
 
-1. Implement M11 application orchestrator for local backend startup/shutdown.
-2. Wire existing config, logging, event bus, storage, market data, candle, timeframe, structure, trend, replay, scanner, AI, and read API components.
-3. Expose clean lifecycle controls: start, stop, health/status.
-4. Provide a dry-run or replay-friendly local mode for deterministic development.
-5. Add integration tests proving components use the existing shared event path.
+M21 should consume existing deterministic outputs only:
 
-Short roadmap after M11: connect the assembled backend to local visualization runtime, then harden live/replay operational workflows.
+- 1W, 1D, 4H, 2H, 1H, and 30M trend states.
+- 15M, 5M, and 1M structure snapshots.
+- BOS events, latest candles/body levels, and multi-timeframe alignment.
+
+M21 should classify the market as `WAIT`, `WATCH`, `LONG_SETUP`, `SHORT_SETUP`, `ENTRY_READY`, or `INVALIDATED`.
+
+M21 shall not execute trades, calculate position size, place orders, or use AI to decide structure. AI remains a downstream explanation layer over structured facts.
+
+Short roadmap after M21: expose entry signal state through backend APIs, then add optional UI rendering for entry-state diagnostics without adding order execution.
 
 ## LLM Role
 

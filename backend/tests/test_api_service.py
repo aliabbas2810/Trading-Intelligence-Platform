@@ -538,6 +538,28 @@ def test_ai_decision_endpoint_handles_missing_data_cleanly() -> None:
     assert payload["reasons"][0]["category"] == "missing_data"
 
 
+def test_entry_evaluate_endpoint_returns_decision_trace() -> None:
+    """Covers ENTRY-001 through ENTRY-006 and TEST-001."""
+
+    runtime = BackendRuntime(mode=RuntimeMode.DRY_RUN)
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post("/api/entry/evaluate", json={"symbol": "BTCUSDT"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["state"] == "ENTRY_READY"
+    assert payload["direction"] == "LONG"
+    assert payload["trigger_timeframe"] == "1m"
+    assert "one_minute_trigger" in payload["reasons"]
+    assert {item["code"] for item in payload["evidence"]} >= {
+        "higher_timeframes_aligned",
+        "one_minute_trigger",
+    }
+    assert payload["evidence"][0]["category"] == "alignment"
+    assert payload["metadata"]["alignment_score"] == 3
+
+
 def test_cli_can_run_api_mode_without_starting_server(monkeypatch: pytest.MonkeyPatch) -> None:
     """Covers local API CLI wiring for RUNTIME-001 and TEST-001."""
 
@@ -563,6 +585,7 @@ def test_api_layer_does_not_recompute_analysis_logic() -> None:
         (
             Path("backend/api/service.py").read_text(encoding="utf-8"),
             Path("backend/api/ai.py").read_text(encoding="utf-8"),
+            Path("backend/api/entry.py").read_text(encoding="utf-8"),
         ),
     )
 

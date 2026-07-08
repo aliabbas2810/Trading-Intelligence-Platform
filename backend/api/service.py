@@ -8,6 +8,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.ai import AiDecisionRequest, AiDecisionResponse
+from backend.api.entry import EntryDecisionResponse, EntryEvaluateRequest
 from backend.api.replay import ReplayStartRequest, ReplayStatusResponse
 from backend.api.scanner import ScannerRunRequest, ScannerSummaryResponse
 from backend.app.runtime import BackendRuntime, RuntimeState
@@ -172,6 +173,13 @@ def create_app(runtime: BackendRuntime | None = None) -> FastAPI:
             risk_reward=payload.risk_reward,
         )
         return AiDecisionResponse.from_output(output)
+
+    @app.post("/api/entry/evaluate")
+    def entry_evaluate(request: Request, payload: EntryEvaluateRequest) -> object:
+        """Evaluate deterministic entry state for ENTRY-001 through ENTRY-006."""
+
+        trace = runtime_from_request(request).evaluate_entry_signal(symbol=payload.symbol)
+        return EntryDecisionResponse.from_trace(trace)
 
     return app
 
