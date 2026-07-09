@@ -14,7 +14,9 @@ from urllib.request import Request, urlopen
 class SmokeEndpoint:
     name: str
     path: str
+    method: str = "GET"
     query: dict[str, str] | None = None
+    body: dict[str, str | float] | None = None
 
 
 def main() -> int:
@@ -27,16 +29,45 @@ def main() -> int:
     base_url = args.base_url.rstrip("/")
     endpoints = (
         SmokeEndpoint("health", "/api/health"),
-        SmokeEndpoint("candles", "/api/candles", {"symbol": args.symbol, "timeframe": args.timeframe}),
+        SmokeEndpoint("candles", "/api/candles", query={"symbol": args.symbol, "timeframe": args.timeframe}),
         SmokeEndpoint(
             "market-structure",
             "/api/market-structure",
-            {"symbol": args.symbol, "timeframe": args.timeframe},
+            query={"symbol": args.symbol, "timeframe": args.timeframe},
         ),
-        SmokeEndpoint("trend-state", "/api/trend-state", {"symbol": args.symbol, "timeframe": args.timeframe}),
-        SmokeEndpoint("multi-timeframe-alignment", "/api/multi-timeframe-alignment", {"symbol": args.symbol}),
+        SmokeEndpoint("trend-state", "/api/trend-state", query={"symbol": args.symbol, "timeframe": args.timeframe}),
+        SmokeEndpoint("multi-timeframe-alignment", "/api/multi-timeframe-alignment", query={"symbol": args.symbol}),
         SmokeEndpoint("replay-status", "/api/replay/status"),
         SmokeEndpoint("scanner-status", "/api/scanner/status"),
+        SmokeEndpoint("entry", "/api/entry/evaluate", method="POST", body={"symbol": args.symbol}),
+        SmokeEndpoint(
+            "risk",
+            "/api/risk/evaluate",
+            method="POST",
+            body={"symbol": args.symbol, "minimum_risk_reward": 2.0},
+        ),
+        SmokeEndpoint(
+            "checklist",
+            "/api/checklist/evaluate",
+            method="POST",
+            body={"symbol": args.symbol, "minimum_risk_reward": 2.0},
+        ),
+        SmokeEndpoint(
+            "setup-score",
+            "/api/setup-score/evaluate",
+            method="POST",
+            body={"symbol": args.symbol, "minimum_risk_reward": 2.0},
+        ),
+        SmokeEndpoint(
+            "trading-intelligence",
+            "/api/trading-intelligence/evaluate",
+            method="POST",
+            body={
+                "symbol": args.symbol,
+                "timeframe": args.timeframe,
+                "minimum_risk_reward": 2.0,
+            },
+        ),
     )
 
     failed = False
@@ -52,7 +83,7 @@ def main() -> int:
 def check_endpoint(base_url: str, endpoint: SmokeEndpoint) -> tuple[bool, str]:
     url = build_url(base_url, endpoint)
     try:
-        payload = get_json(url)
+        payload = request_json(url, method=endpoint.method, body=endpoint.body)
     except HTTPError as error:
         return False, f"HTTP {error.code} {url}"
     except URLError as error:
@@ -73,8 +104,13 @@ def build_url(base_url: str, endpoint: SmokeEndpoint) -> str:
     return f"{base_url}{endpoint.path}?{urlencode(endpoint.query)}"
 
 
-def get_json(url: str) -> Any:
-    request = Request(url, headers={"Accept": "application/json"})
+def request_json(url: str, *, method: str, body: dict[str, str | float] | None = None) -> Any:
+    encoded_body = None
+    headers = {"Accept": "application/json"}
+    if body is not None:
+        encoded_body = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = Request(url, data=encoded_body, headers=headers, method=method)
     with urlopen(request, timeout=5) as response:
         return json.loads(response.read().decode("utf-8"))
 
@@ -83,9 +119,36 @@ def summarize_payload(payload: Any) -> str:
     if isinstance(payload, list):
         return f"list items={len(payload)}"
     if isinstance(payload, dict):
+        intelligence_summary = summarize_intelligence_payload(payload)
+        if intelligence_summary is not None:
+            return intelligence_summary
         keys = ", ".join(sorted(payload.keys())[:6])
         return f"object keys={keys}"
     return type(payload).__name__
+
+
+def summarize_intelligence_payload(payload: dict[str, Any]) -> str | None:
+    if "entry_decision" in payload and "risk_plan" in payload and "setup_score" in payload:
+        return (
+            "entry="
+            f"{payload['entry_decision'].get('state')}/"
+            f"{payload['entry_decision'].get('direction')} "
+            f"risk={payload['risk_plan'].get('state')} "
+            f"checklist={payload['checklist'].get('overall_status')} "
+            f"score={payload['setup_score'].get('grade')}"
+        )
+    if {"state", "direction", "confidence"}.issubset(payload):
+        return f"entry={payload.get('state')}/{payload.get('direction')}"
+    if "risk_reward_ratio" in payload and "state" in payload:
+        return f"risk={payload.get('state')} rr={payload.get('risk_reward_ratio')}"
+    if "overall_status" in payload:
+        return (
+            f"checklist={payload.get('overall_status')} "
+            f"pass={payload.get('pass_count')} fail={payload.get('fail_count')}"
+        )
+    if "grade" in payload and "percentage" in payload:
+        return f"score={payload.get('grade')} percentage={payload.get('percentage')}"
+    return None
 
 
 if __name__ == "__main__":
