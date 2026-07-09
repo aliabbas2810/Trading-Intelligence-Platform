@@ -129,6 +129,46 @@ def test_rr_calculation_is_deterministic() -> None:
     assert RiskEvidenceCode.RISK_REWARD_CALCULATED in tuple(item.code for item in plan.evidence)
 
 
+def test_long_uses_latest_relevant_hl_below_entry() -> None:
+    """Regression: LONG stops must prefer the latest HL below entry."""
+
+    plan = RiskEngine().evaluate(
+        RiskInput(
+            entry_trace=entry_trace(EntryState.ENTRY_READY, EntryDirection.LONG),
+            latest_candle=candle(open_price=104.0, close=105.0),
+            structure_levels=(
+                swing(StructureLabel.HL, 90.0, close_time_ms=60_000),
+                swing(StructureLabel.HL, 95.0, close_time_ms=120_000),
+                swing(StructureLabel.HL, 110.0, close_time_ms=180_000),
+            ),
+            minimum_risk_reward=2.0,
+        ),
+    )
+
+    assert plan.state is RiskAssessmentState.VALID
+    assert plan.stop_loss == 95.0
+
+
+def test_short_uses_latest_relevant_lh_above_entry() -> None:
+    """Regression: SHORT stops must prefer the latest LH above entry."""
+
+    plan = RiskEngine().evaluate(
+        RiskInput(
+            entry_trace=entry_trace(EntryState.ENTRY_READY, EntryDirection.SHORT),
+            latest_candle=candle(open_price=101.0, close=100.0),
+            structure_levels=(
+                swing(StructureLabel.LH, 112.0, close_time_ms=60_000),
+                swing(StructureLabel.LH, 108.0, close_time_ms=120_000),
+                swing(StructureLabel.LH, 95.0, close_time_ms=180_000),
+            ),
+            minimum_risk_reward=2.0,
+        ),
+    )
+
+    assert plan.state is RiskAssessmentState.VALID
+    assert plan.stop_loss == 108.0
+
+
 def test_risk_engine_does_not_recalculate_structure_trend_entry_scanner_or_ai_logic() -> None:
     """Covers RISK-006 no-recalculation constraint."""
 
@@ -173,7 +213,7 @@ def entry_trace(state: EntryState, direction: EntryDirection) -> DecisionTrace:
     )
 
 
-def swing(label: StructureLabel, level: float) -> StructureSwing:
+def swing(label: StructureLabel, level: float, *, close_time_ms: int = 60_000) -> StructureSwing:
     return StructureSwing(
         symbol="BTCUSDT",
         timeframe=Timeframe.FIVE_MINUTE,
@@ -181,7 +221,7 @@ def swing(label: StructureLabel, level: float) -> StructureSwing:
         label=label,
         level=level,
         candle_open_time_ms=0,
-        candle_close_time_ms=60_000,
+        candle_close_time_ms=close_time_ms,
     )
 
 

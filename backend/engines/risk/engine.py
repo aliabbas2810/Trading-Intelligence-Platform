@@ -86,7 +86,7 @@ class RiskEngine:
                 self._blocking_evidence(RiskEvidenceCode.MISSING_ENTRY_PRICE, "missing_entry_price"),
             )
 
-        stop_level = self._stop_level(risk_input.structure_levels, direction)
+        stop_level = self._stop_level(risk_input.structure_levels, entry_price, direction)
         if stop_level is None:
             return RiskPlan(
                 direction=direction,
@@ -173,12 +173,18 @@ class RiskEngine:
     def _stop_level(
         self,
         structure_levels: tuple[StructureSwing, ...],
+        entry_price: float,
         direction: RiskDirection,
     ) -> StructureSwing | None:
         target_label = StructureLabel.HL if direction is RiskDirection.LONG else StructureLabel.LH
         candidates = tuple(level for level in structure_levels if level.label is target_label)
         if not candidates:
             return None
+        relevant_candidates = tuple(
+            level for level in candidates if self._stop_is_valid(entry_price, level.level, direction)
+        )
+        if relevant_candidates:
+            return max(relevant_candidates, key=lambda item: item.candle_close_time_ms)
         return max(candidates, key=lambda item: item.candle_close_time_ms)
 
     def _stop_is_valid(self, entry_price: float, stop_loss: float, direction: RiskDirection) -> bool:

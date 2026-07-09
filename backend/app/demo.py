@@ -227,7 +227,10 @@ def generate_demo_swings(symbol: str) -> tuple[StructureSwing, ...]:
 
     swings: list[StructureSwing] = []
     for index, timeframe in enumerate(DEMO_TIMEFRAMES):
-        base = 42_000.0 + index * 420.0
+        if timeframe in {Timeframe.FIFTEEN_MINUTE, Timeframe.FIVE_MINUTE, Timeframe.ONE_MINUTE}:
+            base = 42_000.0 + (index - 6) * 110.0
+        else:
+            base = 42_000.0 + index * 420.0
         swings.extend(
             demo_swings_for_timeframe(
                 symbol,

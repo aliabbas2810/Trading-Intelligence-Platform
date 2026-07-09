@@ -87,6 +87,29 @@ def test_trading_intelligence_response_is_deterministic_for_demo_data() -> None:
     assert first == second
 
 
+def test_demo_trading_intelligence_chain_has_valid_long_risk() -> None:
+    """Regression: dry-run demo ENTRY_READY LONG must have valid risk and strong score."""
+
+    runtime = BackendRuntime(mode=RuntimeMode.DRY_RUN)
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/trading-intelligence/evaluate",
+            json={"symbol": "BTCUSDT", "timeframe": "4h"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["entry_decision"]["state"] == "ENTRY_READY"
+    assert payload["entry_decision"]["direction"] == "LONG"
+    assert payload["risk_plan"]["state"] == "VALID"
+    assert payload["risk_plan"]["stop_loss"] < payload["risk_plan"]["entry_price"]
+    assert payload["risk_plan"]["take_profit"] > payload["risk_plan"]["entry_price"]
+    assert payload["risk_plan"]["risk_reward_ratio"] >= 2.0
+    assert payload["checklist"]["overall_status"] != "FAIL"
+    assert payload["setup_score"]["grade"] in {"A", "B"}
+
+
 def test_trading_intelligence_api_does_not_recompute_analysis_logic() -> None:
     """Covers INTEL-003 and INTEL-006 transport-only API constraint."""
 
