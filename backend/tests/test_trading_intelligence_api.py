@@ -108,6 +108,8 @@ def test_demo_trading_intelligence_chain_has_valid_long_risk() -> None:
     assert payload["risk_plan"]["risk_reward_ratio"] >= 2.0
     assert payload["checklist"]["overall_status"] != "FAIL"
     assert payload["setup_score"]["grade"] in {"A", "B"}
+    assert payload["ai_decision"]["recommendation"] == "consider_long"
+    assert 0.8 <= payload["ai_decision"]["confidence"] <= 0.95
 
 
 def test_trading_intelligence_api_does_not_recompute_analysis_logic() -> None:
@@ -210,6 +212,10 @@ class RecordingTradingIntelligenceRuntime(BackendRuntime):
         timeframe: Timeframe = Timeframe.FOUR_HOUR,
         entry_signal: str | None = None,
         risk_reward: str | None = None,
+        entry_trace: DecisionTrace | None = None,
+        risk_plan: RiskPlan | None = None,
+        checklist_result: ChecklistResult | None = None,
+        setup_score: SetupScore | None = None,
     ) -> AiDecisionOutput:
         self.calls.append("ai")
         self.captured_entry_signal = entry_signal
@@ -219,6 +225,10 @@ class RecordingTradingIntelligenceRuntime(BackendRuntime):
             timeframe=timeframe,
             entry_signal=entry_signal,
             risk_reward=risk_reward,
+            entry_trace=entry_trace,
+            risk_plan=risk_plan,
+            checklist_result=checklist_result,
+            setup_score=setup_score,
         )
 
 

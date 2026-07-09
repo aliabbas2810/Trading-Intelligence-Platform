@@ -358,6 +358,10 @@ class BackendRuntime:
         timeframe: Timeframe = Timeframe.FOUR_HOUR,
         entry_signal: str | None = None,
         risk_reward: str | None = None,
+        entry_trace: DecisionTrace | None = None,
+        risk_plan: RiskPlan | None = None,
+        checklist_result: ChecklistResult | None = None,
+        setup_score: SetupScore | None = None,
     ) -> AiDecisionOutput:
         """Generate a structured mock-provider decision for FR-1001 through FR-1006."""
 
@@ -374,6 +378,13 @@ class BackendRuntime:
             latest_trend=trend,
             entry_signal=entry_signal,
             risk_reward=risk_reward,
+            entry_state=entry_trace.state if entry_trace is not None else None,
+            entry_direction=entry_trace.direction if entry_trace is not None else None,
+            risk_state=risk_plan.state if risk_plan is not None else None,
+            checklist_status=checklist_result.overall_status if checklist_result is not None else None,
+            setup_grade=setup_score.grade if setup_score is not None else None,
+            setup_score_percentage=setup_score.percentage if setup_score is not None else None,
+            risk_reward_ratio=risk_plan.risk_reward_ratio if risk_plan is not None else None,
         )
         return self.ai_decision_engine.generate_decision(decision_input)
 
@@ -508,6 +519,10 @@ class BackendRuntime:
                 f"rr={risk_plan.risk_reward_ratio};"
                 f"score={setup_score.grade.value}:{setup_score.percentage:.2f}"
             ),
+            entry_trace=entry_trace,
+            risk_plan=risk_plan,
+            checklist_result=checklist_result,
+            setup_score=setup_score,
         )
         return TradingIntelligenceResult(
             symbol=symbol,

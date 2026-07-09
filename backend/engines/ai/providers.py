@@ -11,6 +11,10 @@ from backend.engines.ai.models import (
     AiRiskAssessment,
     AiRiskSeverity,
 )
+from backend.engines.checklist import ChecklistItemStatus
+from backend.engines.entry import EntryDirection, EntryState
+from backend.engines.risk import RiskAssessmentState
+from backend.engines.scoring import ScoreGrade
 from backend.engines.trend import DirectionalBias
 
 
@@ -48,6 +52,16 @@ class RuleBasedMockAiDecisionProvider:
         )
 
     def _recommendation(self, decision_input: AiDecisionInput) -> AiRecommendation:
+        if self._has_invalid_intelligence(decision_input):
+            return AiRecommendation.AVOID
+        if decision_input.entry_state is EntryState.WATCH:
+            return AiRecommendation.WATCH
+        if self._is_strong_valid_setup(decision_input):
+            if decision_input.entry_direction is EntryDirection.LONG:
+                return AiRecommendation.CONSIDER_LONG
+            if decision_input.entry_direction is EntryDirection.SHORT:
+                return AiRecommendation.CONSIDER_SHORT
+
         bias = decision_input.setup_candidate.bias if decision_input.setup_candidate is not None else None
         score = decision_input.setup_candidate.score if decision_input.setup_candidate is not None else 0.0
         if bias is DirectionalBias.BULLISH and score >= 30.0:
@@ -59,6 +73,13 @@ class RuleBasedMockAiDecisionProvider:
         return AiRecommendation.WATCH
 
     def _confidence(self, decision_input: AiDecisionInput) -> float:
+        if self._is_strong_valid_setup(decision_input):
+            score_bonus = (decision_input.setup_score_percentage or 0.0) / 1000.0
+            return round(min(0.95, 0.82 + score_bonus), 2)
+        if self._has_invalid_intelligence(decision_input):
+            return 0.2
+        if decision_input.entry_state is EntryState.WATCH:
+            return 0.45
         if decision_input.setup_candidate is None:
             return 0.1
         confidence = min(0.95, 0.2 + (decision_input.setup_candidate.score / 100.0))
@@ -80,11 +101,21 @@ class RuleBasedMockAiDecisionProvider:
             risks.append("Entry signal is not supplied.")
         if decision_input.risk_reward is None:
             risks.append("Risk/reward context is not supplied.")
+        if decision_input.risk_state is RiskAssessmentState.INVALID:
+            risks.append("Risk plan is invalid.")
+        if decision_input.risk_state is RiskAssessmentState.INCOMPLETE:
+            risks.append("Risk plan is incomplete.")
+        if decision_input.checklist_status is ChecklistItemStatus.FAIL:
+            risks.append("Checklist contains failed items.")
+        if decision_input.entry_state is EntryState.WATCH:
+            risks.append("Entry setup is still watch-only.")
         if not risks:
             risks.append("No additional deterministic risk context was supplied.")
         return tuple(risks)
 
     def _risk_severity(self, risks: tuple[str, ...]) -> AiRiskSeverity:
+        if any(risk in {"Risk plan is invalid.", "Checklist contains failed items."} for risk in risks):
+            return AiRiskSeverity.HIGH
         if len(risks) >= 3:
             return AiRiskSeverity.HIGH
         if len(risks) == 2:
@@ -117,6 +148,38 @@ class RuleBasedMockAiDecisionProvider:
                     evidence=decision_input.latest_trend.update.state.value,
                 ),
             )
+        if decision_input.entry_state is not None:
+            reasons.append(
+                AiReason(
+                    category="entry",
+                    message="Entry decision state was supplied.",
+                    evidence=f"{decision_input.entry_state.value}/{decision_input.entry_direction.value if decision_input.entry_direction is not None else 'NONE'}",
+                ),
+            )
+        if decision_input.risk_state is not None:
+            reasons.append(
+                AiReason(
+                    category="risk",
+                    message="Risk assessment state was supplied.",
+                    evidence=f"{decision_input.risk_state.value}/rr={decision_input.risk_reward_ratio}",
+                ),
+            )
+        if decision_input.checklist_status is not None:
+            reasons.append(
+                AiReason(
+                    category="checklist",
+                    message="Checklist status was supplied.",
+                    evidence=decision_input.checklist_status.value,
+                ),
+            )
+        if decision_input.setup_grade is not None:
+            reasons.append(
+                AiReason(
+                    category="setup_score",
+                    message="Setup score grade was supplied.",
+                    evidence=f"{decision_input.setup_grade.value}/{decision_input.setup_score_percentage}",
+                ),
+            )
         if not reasons:
             reasons.append(
                 AiReason(
@@ -126,3 +189,20 @@ class RuleBasedMockAiDecisionProvider:
                 ),
             )
         return tuple(reasons)
+
+    def _is_strong_valid_setup(self, decision_input: AiDecisionInput) -> bool:
+        return (
+            decision_input.entry_state is EntryState.ENTRY_READY
+            and decision_input.entry_direction in {EntryDirection.LONG, EntryDirection.SHORT}
+            and decision_input.risk_state is RiskAssessmentState.VALID
+            and decision_input.checklist_status is ChecklistItemStatus.PASS
+            and decision_input.setup_grade in {ScoreGrade.A, ScoreGrade.B}
+        )
+
+    def _has_invalid_intelligence(self, decision_input: AiDecisionInput) -> bool:
+        return (
+            decision_input.entry_state is EntryState.INVALIDATED
+            or decision_input.risk_state is RiskAssessmentState.INVALID
+            or decision_input.checklist_status is ChecklistItemStatus.FAIL
+            or decision_input.setup_grade is ScoreGrade.F
+        )

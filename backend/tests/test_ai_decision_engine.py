@@ -15,7 +15,11 @@ from backend.engines.ai import (
     AiRiskSeverity,
     RuleBasedMockAiDecisionProvider,
 )
+from backend.engines.checklist import ChecklistItemStatus
+from backend.engines.entry import EntryDirection, EntryState
+from backend.engines.risk import RiskAssessmentState
 from backend.engines.scanner import SetupCandidate
+from backend.engines.scoring import ScoreGrade
 from backend.engines.structure import (
     BreakDirection,
     BreakOfStructure,
@@ -133,6 +137,33 @@ def decision_input() -> AiDecisionInput:
     )
 
 
+def intelligence_decision_input(
+    *,
+    entry_state: EntryState = EntryState.ENTRY_READY,
+    entry_direction: EntryDirection = EntryDirection.LONG,
+    risk_state: RiskAssessmentState = RiskAssessmentState.VALID,
+    checklist_status: ChecklistItemStatus = ChecklistItemStatus.PASS,
+    setup_grade: ScoreGrade = ScoreGrade.A,
+    setup_score_percentage: float = 100.0,
+) -> AiDecisionInput:
+    return AiDecisionInput(
+        symbol="BTCUSDT",
+        timeframe_states=alignment().snapshots,
+        alignment=alignment(),
+        latest_structure=structure_snapshot(),
+        latest_trend=TrendSnapshot(update=trend_update()),
+        entry_signal=f"{entry_state.value}:{entry_direction.value}",
+        risk_reward=f"risk_state={risk_state.value};rr=2.0;score={setup_grade.value}:{setup_score_percentage:.2f}",
+        entry_state=entry_state,
+        entry_direction=entry_direction,
+        risk_state=risk_state,
+        checklist_status=checklist_status,
+        setup_grade=setup_grade,
+        setup_score_percentage=setup_score_percentage,
+        risk_reward_ratio=2.0,
+    )
+
+
 def test_context_builder_uses_structured_facts_only() -> None:
     """Covers FR-1001, FR-1002, and TEST-001."""
 
@@ -145,6 +176,20 @@ def test_context_builder_uses_structured_facts_only() -> None:
     assert "Do not calculate candles, structure, trend, scanner score, or risk metrics." in context.prompt
 
 
+def test_context_builder_includes_trading_intelligence_facts() -> None:
+    """Covers INTEL-004 structured AI context."""
+
+    context = AiDecisionContextBuilder().build(intelligence_decision_input())
+
+    assert "entry_state=ENTRY_READY" in context.facts
+    assert "entry_direction=LONG" in context.facts
+    assert "risk_state=VALID" in context.facts
+    assert "checklist_status=PASS" in context.facts
+    assert "setup_grade=A" in context.facts
+    assert "setup_score_percentage=100.00" in context.facts
+    assert "risk_reward_ratio=2.0000" in context.facts
+
+
 def test_mock_provider_generates_structured_long_decision() -> None:
     """Covers FR-1002, FR-1003, FR-1004, FR-1005, and TEST-001."""
 
@@ -155,6 +200,57 @@ def test_mock_provider_generates_structured_long_decision() -> None:
     assert output.risk_assessment.severity is AiRiskSeverity.LOW
     assert output.provider == "rule_based_mock"
     assert [reason.category for reason in output.reasons] == ["alignment", "scanner", "trend"]
+
+
+def test_mock_provider_generates_high_confidence_for_valid_long_intelligence() -> None:
+    """Covers INTEL-004 consistency for ENTRY_READY + VALID + PASS + A/B."""
+
+    output = RuleBasedMockAiDecisionProvider().generate_decision(intelligence_decision_input())
+
+    assert output.recommendation is AiRecommendation.CONSIDER_LONG
+    assert 0.8 <= output.confidence <= 0.95
+    assert output.risk_assessment.severity is AiRiskSeverity.LOW
+    assert {reason.category for reason in output.reasons} >= {
+        "entry",
+        "risk",
+        "checklist",
+        "setup_score",
+    }
+
+
+def test_mock_provider_avoids_invalid_intelligence_setup() -> None:
+    """Invalid risk/checklist failures should not produce a long recommendation."""
+
+    output = RuleBasedMockAiDecisionProvider().generate_decision(
+        intelligence_decision_input(
+            risk_state=RiskAssessmentState.INVALID,
+            checklist_status=ChecklistItemStatus.FAIL,
+            setup_grade=ScoreGrade.F,
+            setup_score_percentage=20.0,
+        ),
+    )
+
+    assert output.recommendation is AiRecommendation.AVOID
+    assert output.confidence == 0.2
+    assert output.risk_assessment.severity is AiRiskSeverity.HIGH
+
+
+def test_mock_provider_keeps_watch_state_as_watch() -> None:
+    """WATCH setup should stay watch even with partial context supplied."""
+
+    output = RuleBasedMockAiDecisionProvider().generate_decision(
+        intelligence_decision_input(
+            entry_state=EntryState.WATCH,
+            entry_direction=EntryDirection.NONE,
+            risk_state=RiskAssessmentState.NOT_APPLICABLE,
+            checklist_status=ChecklistItemStatus.MISSING,
+            setup_grade=ScoreGrade.D,
+            setup_score_percentage=45.0,
+        ),
+    )
+
+    assert output.recommendation is AiRecommendation.WATCH
+    assert output.confidence == 0.45
 
 
 def test_engine_calls_provider_and_validates_symbol_consistency() -> None:

@@ -4,7 +4,11 @@ from dataclasses import dataclass
 from enum import Enum
 
 from backend.api import StructureSnapshot, TrendSnapshot
+from backend.engines.checklist import ChecklistItemStatus
+from backend.engines.entry import EntryDirection, EntryState
+from backend.engines.risk import RiskAssessmentState
 from backend.engines.scanner import SetupCandidate
+from backend.engines.scoring import ScoreGrade
 from backend.engines.trend import MultiTimeframeTrendResult, TimeframeTrendSnapshot
 
 
@@ -62,6 +66,13 @@ class AiDecisionInput:
     latest_trend: TrendSnapshot | None = None
     entry_signal: str | None = None
     risk_reward: str | None = None
+    entry_state: EntryState | None = None
+    entry_direction: EntryDirection | None = None
+    risk_state: RiskAssessmentState | None = None
+    checklist_status: ChecklistItemStatus | None = None
+    setup_grade: ScoreGrade | None = None
+    setup_score_percentage: float | None = None
+    risk_reward_ratio: float | None = None
 
     def __post_init__(self) -> None:
         if not self.symbol:

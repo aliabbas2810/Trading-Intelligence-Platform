@@ -59,6 +59,21 @@ class AiDecisionContextBuilder:
         else:
             facts.append("entry_signal=missing")
 
+        if decision_input.entry_state is not None:
+            facts.append(f"entry_state={decision_input.entry_state.value}")
+        if decision_input.entry_direction is not None:
+            facts.append(f"entry_direction={decision_input.entry_direction.value}")
+        if decision_input.risk_state is not None:
+            facts.append(f"risk_state={decision_input.risk_state.value}")
+        if decision_input.checklist_status is not None:
+            facts.append(f"checklist_status={decision_input.checklist_status.value}")
+        if decision_input.setup_grade is not None:
+            facts.append(f"setup_grade={decision_input.setup_grade.value}")
+        if decision_input.setup_score_percentage is not None:
+            facts.append(f"setup_score_percentage={decision_input.setup_score_percentage:.2f}")
+        if decision_input.risk_reward_ratio is not None:
+            facts.append(f"risk_reward_ratio={decision_input.risk_reward_ratio:.4f}")
+
         if decision_input.risk_reward is not None:
             facts.append(f"risk_reward={decision_input.risk_reward}")
         else:
