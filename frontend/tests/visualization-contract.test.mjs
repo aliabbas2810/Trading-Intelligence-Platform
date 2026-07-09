@@ -46,6 +46,14 @@ test("frontend calls scanner API endpoints", () => {
   assert.match(apiSource, /method: "POST"/);
 });
 
+test("frontend calls trading intelligence endpoint", () => {
+  assert.match(apiSource, /evaluateTradingIntelligence/);
+  assert.match(apiSource, /\/trading-intelligence\/evaluate/);
+  assert.match(apiSource, /symbol,\s*timeframe/);
+  assert.match(apiSource, /method: "POST"/);
+  assert.match(appSource, /evaluateTradingIntelligence\(symbol, timeframe\)/);
+});
+
 test("frontend API base URL and polling are configurable", () => {
   assert.match(configSource, /DEFAULT_API_BASE_URL = "http:\/\/127\.0\.0\.1:8000"/);
   assert.match(configSource, /DEFAULT_POLL_INTERVAL_MS = 0/);
@@ -65,6 +73,17 @@ test("scanner UI does not calculate scanner scores locally", () => {
   assert.doesNotMatch(appSource, /score_candidate|ScannerEngine|setupScore|alignment.*\*|trend.*strength.*\+/i);
   assert.match(appSource, /candidate\.score/);
   assert.match(appSource, /candidate\.reasons/);
+});
+
+test("trading intelligence panel does not calculate intelligence locally", () => {
+  assert.doesNotMatch(appSource, /EntrySignalEngine|RiskEngine|ChecklistEngine|SetupScoringEngine|AiDecisionEngine/i);
+  assert.doesNotMatch(appSource, /calculateEntry|calculateRisk|calculateChecklist|calculateScore|generateAi/i);
+  assert.doesNotMatch(appSource, /stop_loss\s*[<>=]|take_profit\s*[<>=]|risk_reward_ratio\s*[+\-*/]/);
+  assert.match(appSource, /entry_decision/);
+  assert.match(appSource, /risk_plan/);
+  assert.match(appSource, /checklist/);
+  assert.match(appSource, /setup_score/);
+  assert.match(appSource, /ai_decision/);
 });
 
 test("visualization controls required by M7 are present", () => {
@@ -120,8 +139,8 @@ test("replay and scanner panels are collapsible so the chart stays primary", () 
   assert.doesNotMatch(appSource, /<details className="replay-panel" open/);
   assert.doesNotMatch(appSource, /<details className="scanner-panel" open/);
   assert.match(styleSource, /\.chart-frame/);
-  assert.match(styleSource, /calc\(100vh - 230px\)/);
-  assert.match(styleSource, /max\(420px/);
+  assert.match(styleSource, /calc\(100vh - 350px\)/);
+  assert.match(styleSource, /max\(380px/);
 });
 
 test("scanner controls and results are present", () => {
@@ -154,6 +173,43 @@ test("scanner result selection updates chart symbol without local chart data ass
   assert.match(appSource, /setSymbol\(candidate\.symbol\)/);
   assert.match(appSource, /No chart data available for/);
   assert.match(appSource, /data\.candles\.length === 0/);
+});
+
+test("trading intelligence panel renders consolidated backend fields", () => {
+  assert.match(appSource, /TradingIntelligencePanel/);
+  assert.match(appSource, /Trading intelligence panel/);
+  assert.match(appSource, /Entry state/);
+  assert.match(appSource, /Direction/);
+  assert.match(appSource, /Confidence/);
+  assert.match(appSource, /Risk state/);
+  assert.match(appSource, /Entry price/);
+  assert.match(appSource, /Stop loss/);
+  assert.match(appSource, /Take profit/);
+  assert.match(appSource, /R:R/);
+  assert.match(appSource, /Checklist counts/);
+  assert.match(appSource, /Setup score/);
+  assert.match(appSource, /Setup grade/);
+  assert.match(appSource, /AI recommendation/);
+  assert.match(appSource, /AI confidence/);
+  assert.match(appSource, /ai\?\.explanation/);
+});
+
+test("trading intelligence panel updates with symbol timeframe and refresh", () => {
+  assert.match(appSource, /const \[intelligence, setIntelligence\]/);
+  assert.match(appSource, /const \[intelligenceLoading, setIntelligenceLoading\]/);
+  assert.match(appSource, /const \[intelligenceError, setIntelligenceError\]/);
+  assert.match(appSource, /\[symbol, timeframe, refreshKey\]/);
+  assert.match(appSource, /setRefreshKey\(\(value\) => value \+ 1\)/);
+  assert.match(appSource, /setSymbol\(candidate\.symbol\)/);
+});
+
+test("trading intelligence panel exposes loading error missing and valid states", () => {
+  assert.match(appSource, /Loading intelligence/);
+  assert.match(appSource, /Backend intelligence loaded/);
+  assert.match(appSource, /Intelligence error:/);
+  assert.match(appSource, /Missing data/);
+  assert.match(appSource, /No trading intelligence response yet\./);
+  assert.match(appSource, /role="alert"/);
 });
 
 test("visualization exposes loading and API error states", () => {

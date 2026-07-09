@@ -8,6 +8,7 @@ import type {
   ScannerSummaryDto,
   StructureSnapshotDto,
   Timeframe,
+  TradingIntelligenceDto,
   TrendSnapshotDto,
 } from "./types";
 import { API_BASE_URL } from "./config";
@@ -97,4 +98,14 @@ export function runScanner(request: ScannerRunRequestDto): Promise<ScannerSummar
 
 export function fetchScannerStatus(): Promise<ScannerSummaryDto> {
   return getJson<ScannerSummaryDto>("/scanner/status");
+}
+
+export function evaluateTradingIntelligence(
+  symbol: string,
+  timeframe: Timeframe,
+): Promise<TradingIntelligenceDto> {
+  return postJson<TradingIntelligenceDto>("/trading-intelligence/evaluate", {
+    symbol,
+    timeframe,
+  });
 }

@@ -17,6 +17,7 @@ import {
   fetchReplayStatus,
   fetchScannerStatus,
   fetchTrendState,
+  evaluateTradingIntelligence,
   pauseReplay,
   resumeReplay,
   runScanner,
@@ -37,6 +38,7 @@ import type {
   SetupCandidateDto,
   StructureSnapshotDto,
   Timeframe,
+  TradingIntelligenceDto,
   TrendSnapshotDto,
 } from "../types";
 
@@ -73,6 +75,9 @@ export function VisualizationApp() {
   const [scannerLoading, setScannerLoading] = useState(false);
   const [scannerError, setScannerError] = useState<string | null>(null);
   const [selectedScannerSymbol, setSelectedScannerSymbol] = useState<string | null>(null);
+  const [intelligence, setIntelligence] = useState<TradingIntelligenceDto | null>(null);
+  const [intelligenceLoading, setIntelligenceLoading] = useState(false);
+  const [intelligenceError, setIntelligenceError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -174,6 +179,32 @@ export function VisualizationApp() {
       active = false;
     };
   }, [refreshKey]);
+
+  useEffect(() => {
+    let active = true;
+    async function loadTradingIntelligence() {
+      setIntelligenceLoading(true);
+      setIntelligenceError(null);
+      try {
+        const response = await evaluateTradingIntelligence(symbol, timeframe);
+        if (active) {
+          setIntelligence(response);
+        }
+      } catch (error) {
+        if (active) {
+          setIntelligenceError(error instanceof Error ? error.message : "Unable to load trading intelligence");
+        }
+      } finally {
+        if (active) {
+          setIntelligenceLoading(false);
+        }
+      }
+    }
+    void loadTradingIntelligence();
+    return () => {
+      active = false;
+    };
+  }, [symbol, timeframe, refreshKey]);
 
   const replayActive = isReplayActive(replayStatus);
   const replayCursorTimeMs = replayCursorTimestamp(data.candles, replayStatus);
@@ -318,6 +349,11 @@ export function VisualizationApp() {
           <span>{data.alignmentScore}/3 aligned</span>
         </section>
       ) : null}
+      <TradingIntelligencePanel
+        intelligence={intelligence}
+        loading={intelligenceLoading}
+        error={intelligenceError}
+      />
       <ReplayControls
         source={replaySource}
         speed={replaySpeed}
@@ -361,6 +397,74 @@ export function VisualizationApp() {
         bos={bosVisible ? visibleBos : []}
       />
     </main>
+  );
+}
+
+function TradingIntelligencePanel({
+  intelligence,
+  loading,
+  error,
+}: {
+  intelligence: TradingIntelligenceDto | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  const entry = intelligence?.entry_decision;
+  const risk = intelligence?.risk_plan;
+  const checklist = intelligence?.checklist;
+  const setup = intelligence?.setup_score;
+  const ai = intelligence?.ai_decision;
+  const hasMissingData =
+    intelligence !== null && (entry?.state === "WAIT" || checklist?.missing_count !== 0 || risk?.state === "INCOMPLETE");
+  const reasons = [...(entry?.reasons ?? []), ...(risk?.reasons ?? []), ...(ai?.reasons.map((item) => item.message ?? item.evidence ?? "") ?? [])]
+    .filter(Boolean)
+    .slice(0, 5);
+
+  return (
+    <section className="intelligence-panel" aria-label="Trading intelligence panel">
+      <div className="intelligence-header">
+        <strong>Trading Intelligence</strong>
+        <span>{loading ? "Loading intelligence" : "Backend intelligence loaded"}</span>
+        {error ? <strong role="alert">Intelligence error: {error}</strong> : null}
+        {hasMissingData ? <span className="muted-warning">Missing data</span> : null}
+      </div>
+      {intelligence === null && !loading && error === null ? (
+        <div className="intelligence-empty">No trading intelligence response yet.</div>
+      ) : null}
+      {intelligence !== null ? (
+        <>
+          <div className="intelligence-grid">
+            <Metric label="Entry state" value={entry?.state ?? "missing"} />
+            <Metric label="Direction" value={entry?.direction ?? "missing"} />
+            <Metric label="Confidence" value={formatPercent(entry?.confidence)} />
+            <Metric label="Risk state" value={risk?.state ?? "missing"} />
+            <Metric label="Entry price" value={formatNumber(risk?.entry_price)} />
+            <Metric label="Stop loss" value={formatNumber(risk?.stop_loss)} />
+            <Metric label="Take profit" value={formatNumber(risk?.take_profit)} />
+            <Metric label="R:R" value={formatNumber(risk?.risk_reward_ratio)} />
+            <Metric label="Checklist" value={checklist?.overall_status ?? "missing"} />
+            <Metric label="Checklist counts" value={formatChecklistCounts(checklist)} />
+            <Metric label="Setup score" value={formatPercentFromNumber(setup?.percentage)} />
+            <Metric label="Setup grade" value={setup?.grade ?? "missing"} />
+            <Metric label="AI recommendation" value={ai?.recommendation ?? "missing"} />
+            <Metric label="AI confidence" value={formatPercent(ai?.confidence)} />
+          </div>
+          <p className="ai-explanation">{ai?.explanation ?? "AI explanation unavailable."}</p>
+          <div className="intelligence-reasons">
+            {reasons.length > 0 ? reasons.map((reason) => <span key={reason}>{reason}</span>) : <span>No reasons supplied.</span>}
+          </div>
+        </>
+      ) : null}
+    </section>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="metric">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
   );
 }
 
@@ -750,6 +854,34 @@ function parseScannerSymbols(value: string): string[] {
     .split(",")
     .map((item) => item.trim().toUpperCase())
     .filter(Boolean);
+}
+
+function formatNumber(value: number | null | undefined): string {
+  if (value === null || value === undefined) {
+    return "missing";
+  }
+  return value.toLocaleString(undefined, { maximumFractionDigits: 4 });
+}
+
+function formatPercent(value: number | null | undefined): string {
+  if (value === null || value === undefined) {
+    return "missing";
+  }
+  return `${Math.round(value * 100)}%`;
+}
+
+function formatPercentFromNumber(value: number | null | undefined): string {
+  if (value === null || value === undefined) {
+    return "missing";
+  }
+  return `${value.toFixed(1)}%`;
+}
+
+function formatChecklistCounts(checklist: TradingIntelligenceDto["checklist"] | undefined): string {
+  if (checklist === undefined) {
+    return "missing";
+  }
+  return `${checklist.pass_count}P/${checklist.fail_count}F/${checklist.warning_count}W/${checklist.missing_count}M`;
 }
 
 function removeAllPriceLines(series: ISeriesApi<"Candlestick">): void {

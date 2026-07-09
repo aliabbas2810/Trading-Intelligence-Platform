@@ -121,3 +121,64 @@ export interface ScannerSummaryDto {
   candidates: SetupCandidateDto[];
   results: SymbolScanResultDto[];
 }
+
+export interface EvidenceDto {
+  code?: string;
+  category?: string;
+  description?: string;
+  message?: string;
+  evidence?: string;
+  severity?: string;
+  timeframe?: Timeframe | null;
+}
+
+export interface TradingIntelligenceDto {
+  symbol: string;
+  timeframe: Timeframe;
+  entry_decision: {
+    state: string;
+    direction: string;
+    confidence: number;
+    reasons: string[];
+    evidence: EvidenceDto[];
+    missing_confirmations: string[];
+    invalidation_conditions: string[];
+    trigger_timeframe: Timeframe | null;
+  };
+  risk_plan: {
+    direction: string;
+    state: string;
+    entry_price: number | null;
+    stop_loss: number | null;
+    take_profit: number | null;
+    risk_reward_ratio: number | null;
+    invalidation_level: number | null;
+    risk_level: string | null;
+    reasons: string[];
+    warnings: string[];
+  };
+  checklist: {
+    overall_status: string;
+    pass_count: number;
+    fail_count: number;
+    warning_count: number;
+    missing_count: number;
+    summary: string;
+  };
+  setup_score: {
+    total_score: number;
+    max_score: number;
+    percentage: number;
+    grade: string;
+    summary: string;
+    warnings: string[];
+  };
+  ai_decision: {
+    recommendation: string;
+    confidence: number;
+    explanation: string;
+    reasons: EvidenceDto[];
+    provider: string;
+  };
+  metadata: Record<string, string | number | boolean | null>;
+}
