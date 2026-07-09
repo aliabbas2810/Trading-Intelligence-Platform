@@ -1,49 +1,121 @@
 # Trading Intelligence Platform
 
-A modular, deterministic market-structure analysis platform for crypto markets.
+Trading Intelligence Platform (TIP) is a deterministic multi-timeframe trading intelligence platform for crypto market analysis. It currently focuses on a local BTCUSDT demo workflow while preserving architecture for Binance Spot live trade ingestion.
 
-TIP is currently at the v0.1.0 foundation stage after Milestones M1-M10. The repository contains backend foundations for market data ingestion, candle generation, timeframe aggregation, market structure, trend state, replay, scanner ranking, and structured AI decision support, plus a React visualization foundation.
+The system uses an event-driven Python backend, a FastAPI API service, and a React + Lightweight Charts frontend. Trading logic remains in the backend; the frontend renders backend outputs and does not calculate market structure, trend, entry, risk, checklist, score, or AI reasoning.
 
-## Current Capabilities
+## Current Status
 
-- Typed Python backend foundation with Pydantic settings, structured logging, and synchronous event bus.
-- Binance Spot trade message parsing, normalization, validation, and stream-client skeleton.
-- Deterministic 1-minute UTC candle construction from canonical trades.
-- Synthetic empty candles for missing minutes.
-- In-memory and JSONL candle persistence.
-- Deterministic 4H, Daily, and Weekly candle aggregation from completed 1-minute candles.
-- Body-only market structure detection with displacement-confirmed swings and BOS events.
-- Trend engine with immediate and confirmed flip modes.
-- Multi-timeframe trend aggregation over Weekly, Daily, and 4H outputs.
-- Read-only visualization API boundaries.
-- React + Lightweight Charts frontend foundation.
-- Replay engine that reuses the same event bus path as live mode.
-- Backend multi-symbol scanner foundation over existing engine outputs.
-- Backend AI decision engine foundation over structured deterministic inputs with a mock provider.
+- Version/status: v0.3.1, active development.
+- Completed milestones: M1-M26.
+- Latest major capability: Trading Intelligence Panel in the React frontend.
+- Backend verification: 167 pytest tests passing as of the v0.3.1 correctness pass.
+- Frontend verification: 26 frontend contract tests passing as of M26.
 
-## Project Principles
+TIP is not production-ready trading software. It is a local-first deterministic analysis platform under active development.
 
-- Deterministic first.
-- Completed candles only for analysis.
-- Market structure uses candle bodies only.
-- Wicks are preserved for visualization and future SL/TP logic.
-- Replay and live modes share downstream processing paths where practical.
-- Pipelines transform data; engines analyze or enrich context.
-- AI reasons over structured outputs, not raw chart data.
+## Architecture Summary
 
-## Repository Layout
+Core processing flow:
 
-- `backend/core/`: event bus and logging.
-- `backend/config/`: typed settings and default config.
-- `backend/models/`: domain contracts.
+```text
+Market Data
+-> Candle Builder
+-> Timeframe Aggregation
+-> Market Structure
+-> Trend Engine
+-> Multi-Timeframe Alignment
+-> Scanner
+-> Entry Engine
+-> Risk Engine
+-> Checklist Engine
+-> Setup Scoring
+-> AI Decision
+-> Trading Intelligence API
+-> React Frontend
+```
+
+Repository areas:
+
+- `backend/core/`: event bus and structured logging.
+- `backend/config/`: Pydantic settings and default configuration.
+- `backend/models/`: canonical domain contracts such as trades, candles, and timeframes.
 - `backend/pipelines/`: market data, candle, and timeframe pipelines.
-- `backend/engines/`: structure, trend, replay, scanner, and AI engines.
-- `backend/storage/`: persistence boundaries.
-- `backend/api/`: read-only API boundaries.
-- `backend/tests/`: backend tests.
-- `frontend/`: React visualization shell and frontend contract tests.
-- `docs/ADR/`: accepted architecture decisions.
-- `docs/SRS.md`: software requirements specification.
+- `backend/engines/`: structure, trend, replay, scanner, entry, risk, checklist, scoring, intelligence, and AI engines.
+- `backend/storage/`: in-memory and file persistence boundaries.
+- `backend/api/`: FastAPI transport/read/action boundaries.
+- `frontend/`: React visualization, replay, scanner, and trading intelligence UI.
+- `docs/`: SRS, ADRs, stabilization plans, and correctness documentation.
+
+## Supported Timeframes
+
+The platform currently supports:
+
+- `1w`
+- `1d`
+- `4h`
+- `2h`
+- `1h`
+- `30m`
+- `15m`
+- `5m`
+- `1m`
+
+## Completed Milestones
+
+### Phase 1: Foundation / M1-M10
+
+- M1: Repository foundation, typed settings, structured logging, synchronous event bus, tests.
+- M2: Binance Spot trade ingestion foundation, trade normalization, validation, stream-client skeleton.
+- M3: Deterministic 1-minute candle pipeline, synthetic candles, in-memory and JSONL persistence.
+- M4: Higher-timeframe aggregation from completed 1-minute candles.
+- M5: Body-based market structure with displacement-confirmed swings and BOS detection.
+- M6: Trend engine and multi-timeframe aggregation.
+- M7: Visualization API and React + Lightweight Charts foundation.
+- M8: Replay engine foundation.
+- M9: Multi-symbol scanner foundation.
+- M10: AI decision engine foundation with deterministic mock provider.
+
+### Phase 2: Runtime, API, Visualization / M11-M20
+
+- M11: Local backend runtime assembly.
+- M12: Live Binance integration foundation inside runtime mode selection.
+- M13: FastAPI service wiring.
+- M14: Frontend live API data connection.
+- M15: Dry-run demo mode and deterministic seed data.
+- M16: Replay API and runtime controls.
+- M17: Replay UI.
+- M18: Scanner API.
+- M19: Scanner UI.
+- M20: AI Decision API.
+
+### Phase 3: Trading Intelligence / M21-M26
+
+- M21: Entry Signal Engine and typed decision evidence.
+- M22: Risk Engine.
+- M23: Checklist Engine.
+- M24: Setup Scoring Engine.
+- M25: Consolidated Trading Intelligence API.
+- M26: Trading Intelligence Panel.
+
+## Implemented Capabilities
+
+- Dry-run demo mode for BTCUSDT.
+- Live Binance Spot trade-stream integration foundation.
+- Deterministic candle generation and higher-timeframe aggregation.
+- Market structure overlays: HH, HL, LH, LL, and BOS.
+- Trend state and multi-timeframe alignment.
+- TradingView-style non-destructive replay cursor.
+- Scanner backend and frontend panel.
+- Entry Signal Engine.
+- Risk Engine.
+- Checklist Engine.
+- Setup Scoring Engine.
+- Consolidated Trading Intelligence API.
+- Trading Intelligence Panel.
+- Deterministic mock AI decision provider.
+- API smoke test script.
+- v0.3.1 system correctness tests.
 
 ## Setup
 
@@ -60,34 +132,6 @@ Frontend requires Node.js and npm.
 npm install
 ```
 
-## Backend Verification
-
-```powershell
-pytest
-ruff check .
-mypy backend
-```
-
-If command shims are unavailable on Windows, use:
-
-```powershell
-py -3.12 -m pytest
-py -3.12 -m ruff check .
-py -3.12 -m mypy backend
-```
-
-## Frontend Verification
-
-```powershell
-npm test
-```
-
-The root npm test script delegates to the frontend workspace:
-
-```powershell
-npm --prefix frontend test
-```
-
 ## Running Locally
 
 Start the backend API in dry-run mode:
@@ -102,19 +146,18 @@ Start the frontend development server in another terminal:
 npm --prefix frontend run dev -- --host 127.0.0.1 --port 5173
 ```
 
-## Local Run Checklist
+Open:
 
-Use this quick checklist when validating the local backend/frontend loop:
+- Backend health: `http://127.0.0.1:8000/api/health`
+- Frontend: `http://127.0.0.1:5173`
 
-1. Start the backend API with `py -3.12 -m backend.app --api --dry-run --host 127.0.0.1 --port 8000`.
-2. Open `http://127.0.0.1:8000/api/health` and confirm the runtime reports `running`.
-3. Run `py -3.12 scripts/smoke_api.py --base-url http://127.0.0.1:8000 --symbol BTCUSDT --timeframe 4h`.
-4. Start the frontend with `npm --prefix frontend run dev -- --host 127.0.0.1 --port 5173`.
-5. Open `http://127.0.0.1:5173` and confirm the chart, diagnostics strip, replay controls, and scanner panel render.
-6. Switch through all supported timeframes and confirm candles/structure/trend diagnostics update.
-7. Check browser developer tools for uncaught errors.
+Run the API smoke test while the backend is running:
 
-The frontend defaults to `http://127.0.0.1:8000` for API calls. Override it with:
+```powershell
+py -3.12 scripts/smoke_api.py --base-url http://127.0.0.1:8000 --symbol BTCUSDT --timeframe 4h
+```
+
+Frontend API configuration defaults to `http://127.0.0.1:8000`. Override it when needed:
 
 ```powershell
 $env:VITE_TIP_API_BASE_URL="http://127.0.0.1:8000"
@@ -122,21 +165,66 @@ $env:VITE_TIP_POLL_INTERVAL_MS="5000"
 npm --prefix frontend run dev -- --host 127.0.0.1 --port 5173
 ```
 
-## Milestone Status
+## Verification Commands
 
-| Milestone | Status | Goal |
-|---|---|---|
-| M1 | Completed | Repository foundation, configuration, logging, event system |
-| M2 | Completed | Binance market data pipeline foundation |
-| M3 | Completed | 1-minute candle pipeline and persistence |
-| M4 | Completed | 4H / Daily / Weekly timeframe pipeline |
-| M5 | Completed | Body-based market structure engine |
-| M6 | Completed | Trend engine and multi-timeframe aggregation |
-| M7 | Completed | Visualization platform foundation |
-| M8 | Completed | Replay engine |
-| M9 | Completed | Multi-symbol scanner foundation |
-| M10 | Completed | AI decision engine foundation |
+Backend:
 
-## Current Status
+```powershell
+pytest
+ruff check .
+mypy backend
+```
 
-v0.1.0 foundation is complete. The next recommended phase is integration hardening: assemble runtime services, wire live/replay outputs into read stores, add end-to-end replay integration tests, and stabilize the local backend/frontend development loop.
+Windows module form if command shims are unavailable:
+
+```powershell
+py -3.12 -m pytest
+py -3.12 -m ruff check .
+py -3.12 -m mypy backend
+```
+
+Frontend:
+
+```powershell
+npm test
+```
+
+## Local Manual Checklist
+
+1. Start the backend API in dry-run mode.
+2. Confirm `/api/health` reports `running` and `dry_run`.
+3. Run `scripts/smoke_api.py`.
+4. Start the frontend dev server.
+5. Confirm the chart, structure overlays, BOS overlays, trend ribbon, replay controls, scanner panel, and trading intelligence panel render.
+6. Switch through all supported timeframes.
+7. Run scanner and confirm selecting a result updates the chart/intelligence context when demo data exists.
+8. Check browser developer tools and backend logs for errors.
+
+## Current Limitations
+
+- Demo data is synthetic.
+- Current correctness proves integration consistency, not real-market strategy validity.
+- Real HH/HL/LH/LL, BOS, trend, entry, and risk correctness still needs historical and live-market validation.
+- AI provider is currently deterministic/mock, not a real LLM.
+- No order execution.
+- No live trading.
+- No position sizing.
+- No financial advice.
+
+## Roadmap / Next Focus
+
+- System correction and validation.
+- Historical and live-market validation of structure, trend, entry, and risk behavior.
+- Frontend usability and visualization maturity.
+- Real LLM provider integration later, using structured deterministic outputs only.
+- Strategy and risk refinement later, without bypassing deterministic engine boundaries.
+
+## Project Principles
+
+- Deterministic first.
+- Completed candles only for analysis.
+- Market structure uses candle bodies only.
+- Wicks are preserved for visualization and future SL/TP logic.
+- Replay and live modes share downstream processing paths where practical.
+- Pipelines transform data; engines analyze or enrich context.
+- AI reasons over structured outputs, not raw chart data.
