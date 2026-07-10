@@ -8,13 +8,15 @@ import pytest
 from backend.app import (
     BackendRuntime,
     ComponentStatus,
+    HistoricalRuntimeConfig,
     RuntimeAlreadyStartedError,
     RuntimeMode,
     RuntimeState,
 )
 from backend.app.cli import main
 from backend.config import PlatformSettings, load_settings
-from backend.models import Timeframe, Trade
+from backend.engines.historical import HistoricalCandleFileStore, HistoricalCandleRequest
+from backend.models import Candle, Timeframe, Trade
 from backend.pipelines.market_data import BinanceTradeStreamClient
 
 
@@ -81,6 +83,43 @@ def test_dry_run_mode_does_not_require_binance_network_access() -> None:
     assert component_statuses["binance_stream_client"] is ComponentStatus.DISABLED
     assert runtime.market_data_parser is not None
     assert runtime.market_data_pipeline is not None
+
+
+def test_historical_runtime_mode_loads_local_fixture_candles(tmp_path: Path) -> None:
+    """Covers M28 historical runtime loading into read/API stores without network calls."""
+
+    request = historical_request()
+    HistoricalCandleFileStore(tmp_path).save(request, historical_fixture_candles(count=10))
+    runtime = BackendRuntime(
+        mode=RuntimeMode.HISTORICAL,
+        historical_config=HistoricalRuntimeConfig(request=request, data_root=tmp_path),
+    )
+
+    runtime.start()
+    components = {component.name: component for component in runtime.health().components}
+
+    assert runtime.health().mode is RuntimeMode.HISTORICAL
+    assert components["demo_data"].status is ComponentStatus.DISABLED
+    assert components["historical_data"].message == "loaded 10 1m candles for BTCUSDT"
+    assert len(runtime.visualization_api.get_candles("BTCUSDT", Timeframe.ONE_MINUTE)) == 10
+    assert runtime.visualization_api.get_candles("BTCUSDT", Timeframe.ONE_MINUTE)[0].open_time_ms == 0
+
+
+def test_historical_runtime_mode_does_not_seed_demo_data(tmp_path: Path) -> None:
+    """Historical mode must not mix synthetic demo candles into the chart dataset."""
+
+    request = historical_request()
+    HistoricalCandleFileStore(tmp_path).save(request, historical_fixture_candles(count=4))
+    runtime = BackendRuntime(
+        mode=RuntimeMode.HISTORICAL,
+        historical_config=HistoricalRuntimeConfig(request=request, data_root=tmp_path),
+    )
+
+    runtime.start()
+
+    candles = runtime.visualization_api.get_candles("BTCUSDT", Timeframe.ONE_MINUTE)
+    assert len(candles) == 4
+    assert {candle.open_time_ms for candle in candles} == {0, 60_000, 120_000, 180_000}
 
 
 def test_live_binance_mode_starts_stream_client() -> None:
@@ -201,6 +240,38 @@ def test_cli_entrypoint_starts_and_stops_once(capsys: pytest.CaptureFixture[str]
     assert '"state": "running"' in captured.out
 
 
+def test_cli_entrypoint_starts_historical_once(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Covers M28 CLI options for local historical runtime mode."""
+
+    request = historical_request()
+    HistoricalCandleFileStore(tmp_path).save(request, historical_fixture_candles(count=4))
+
+    exit_code = main(
+        [
+            "--historical",
+            "--symbol",
+            "BTCUSDT",
+            "--timeframe",
+            "1m",
+            "--start",
+            "1970-01-01T00:00:00Z",
+            "--end",
+            "1970-01-01T00:04:00Z",
+            "--data-root",
+            str(tmp_path),
+            "--once",
+        ],
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert '"mode": "historical"' in captured.out
+    assert '"state": "running"' in captured.out
+
+
 def test_runtime_does_not_duplicate_business_logic() -> None:
     """Covers no-new-trading-logic constraint and TEST-001."""
 
@@ -265,3 +336,35 @@ def demo_disabled_settings() -> PlatformSettings:
             "demo": settings.demo.model_copy(update={"enabled": False}),
         },
     )
+
+
+def historical_request() -> HistoricalCandleRequest:
+    return HistoricalCandleRequest(
+        symbol="BTCUSDT",
+        timeframe=Timeframe.ONE_MINUTE,
+        start_time_ms=0,
+        end_time_ms=240_000,
+    )
+
+
+def historical_fixture_candles(*, count: int) -> tuple[Candle, ...]:
+    candles: list[Candle] = []
+    close = 100.0
+    for index in range(count):
+        open_price = close
+        close = open_price + 1.0
+        open_time_ms = index * 60_000
+        candles.append(
+            Candle(
+                symbol="BTCUSDT",
+                timeframe=Timeframe.ONE_MINUTE,
+                open_time_ms=open_time_ms,
+                close_time_ms=open_time_ms + 60_000,
+                open=open_price,
+                high=close + 1.0,
+                low=open_price - 1.0,
+                close=close,
+                volume=1.0,
+            ),
+        )
+    return tuple(candles)

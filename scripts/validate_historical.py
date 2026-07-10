@@ -9,9 +9,9 @@ from backend.engines.historical import (
     BinanceHistoricalCandleDownloader,
     HistoricalCandleFileStore,
     HistoricalCandleRequest,
-    HistoricalValidationRunner,
 )
 from backend.engines.historical.loader import parse_utc_timestamp_ms
+from backend.engines.historical.validation import HistoricalValidationRunner
 from backend.models import Timeframe
 
 

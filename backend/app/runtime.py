@@ -5,6 +5,7 @@ import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Protocol
 
 from backend.api import (
@@ -19,6 +20,12 @@ from backend.engines.ai import AiDecisionEngine, AiDecisionInput, AiDecisionOutp
 from backend.engines.checklist import ChecklistEngine, ChecklistInput, ChecklistResult
 from backend.engines.entry import DecisionTrace, EntrySignalEngine, EntrySignalInput
 from backend.engines.intelligence import TradingIntelligenceResult
+from backend.engines.historical import (
+    BinanceHistoricalCandleDownloader,
+    HistoricalCandleFileStore,
+    HistoricalCandleLoader,
+    HistoricalCandleRequest,
+)
 from backend.engines.replay import HistoricalTradeReplaySource, ReplayController
 from backend.engines.risk import RiskEngine, RiskInput, RiskPlan
 from backend.engines.scanner import ScannerEngine, ScannerSummary, SetupCandidate, SymbolScanInput
@@ -51,6 +58,7 @@ from backend.app.replay_runtime import ReplaySourceType, ReplayStatusSnapshot, R
 class RuntimeMode(str, Enum):
     DRY_RUN = "dry_run"
     LIVE_BINANCE = "live_binance"
+    HISTORICAL = "historical"
 
 
 class RuntimeState(str, Enum):
@@ -90,6 +98,15 @@ class RuntimeHealth:
             for component in self.components
             if component.status is not ComponentStatus.DISABLED
         )
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalRuntimeConfig:
+    """Historical runtime input config for M28 local API visualization."""
+
+    request: HistoricalCandleRequest
+    data_root: Path = Path("data") / "historical"
+    download: bool = False
 
 
 class RuntimeAlreadyStartedError(RuntimeError):
@@ -138,9 +155,13 @@ class BackendRuntime:
         *,
         mode: RuntimeMode = RuntimeMode.DRY_RUN,
         live_stream_runner_factory: LiveStreamRunnerFactory | None = None,
+        historical_config: HistoricalRuntimeConfig | None = None,
+        historical_loader: HistoricalCandleLoader | None = None,
     ) -> None:
         self.settings = settings or load_settings()
         self.mode = mode
+        self.historical_config = historical_config
+        self._historical_loader = historical_loader
         self.event_bus = EventBus()
         self.candle_store = InMemoryCandleStore()
         self.market_data_parser = BinanceTradeMessageParser()
@@ -179,6 +200,8 @@ class BackendRuntime:
         self._state = RuntimeState.CREATED
         self._subscribed = False
         self._demo_seeded = False
+        self._historical_loaded = False
+        self._historical_candle_count = 0
         self._logger = get_logger(__name__)
 
     @property
@@ -193,6 +216,7 @@ class BackendRuntime:
 
         configure_logging(self.settings)
         self._subscribe_components()
+        self._load_historical_data_if_enabled()
         self._seed_demo_data_if_enabled()
         self._state = RuntimeState.RUNNING
         self._start_live_stream_if_enabled()
@@ -246,6 +270,11 @@ class BackendRuntime:
                 "demo_data",
                 self._demo_component_status(),
                 self._demo_component_message(),
+            ),
+            ComponentHealth(
+                "historical_data",
+                self._historical_component_status(),
+                self._historical_component_message(),
             ),
         ]
         return RuntimeHealth(
@@ -324,6 +353,8 @@ class BackendRuntime:
         )
         self.replay_service = RuntimeReplayService(symbol=self.active_symbol)
         self._demo_seeded = False
+        self._historical_loaded = False
+        self._historical_candle_count = 0
 
     def run_scanner(
         self,
@@ -553,6 +584,8 @@ class BackendRuntime:
 
     @property
     def active_symbol(self) -> str:
+        if self.historical_config is not None:
+            return self.historical_config.request.symbol
         return self.settings.market_data.symbols[0]
 
     @property
@@ -562,6 +595,10 @@ class BackendRuntime:
     @property
     def demo_data_enabled(self) -> bool:
         return self.mode is RuntimeMode.DRY_RUN and self.settings.demo.enabled
+
+    @property
+    def historical_data_enabled(self) -> bool:
+        return self.mode is RuntimeMode.HISTORICAL and self.historical_config is not None
 
     def _build_binance_stream_client(self) -> BinanceTradeStreamClient:
         return BinanceTradeStreamClient(
@@ -581,6 +618,43 @@ class BackendRuntime:
         self._live_stream_runner = self._live_stream_runner_factory(self.binance_stream_client)
         self._live_stream_runner.start()
 
+    def _load_historical_data_if_enabled(self) -> None:
+        if not self.historical_data_enabled or self._historical_loaded:
+            return
+        if self.historical_config is None:
+            raise RuntimeError("Historical runtime mode requires historical_config")
+
+        candles = self._historical_candles()
+        for candle in candles:
+            self._publish_historical_candle(candle)
+        self._historical_candle_count = len(candles)
+        self._historical_loaded = True
+        self._logger.info("Loaded historical candles into runtime")
+
+    def _historical_candles(self) -> tuple[Candle, ...]:
+        if self.historical_config is None:
+            raise RuntimeError("Historical runtime mode requires historical_config")
+        if self._historical_loader is not None:
+            return self._historical_loader.load(self.historical_config.request)
+
+        store = HistoricalCandleFileStore(self.historical_config.data_root)
+        if not self.historical_config.download:
+            return store.load(self.historical_config.request)
+
+        downloader = BinanceHistoricalCandleDownloader()
+        candles = downloader.load(self.historical_config.request)
+        store.save(self.historical_config.request, candles)
+        return candles
+
+    def _publish_historical_candle(self, candle: Candle) -> None:
+        """Publish completed historical candles through existing runtime paths."""
+
+        if candle.timeframe is Timeframe.ONE_MINUTE:
+            self.event_bus.publish(CandleClosedEvent(candle=candle))
+            return
+        self._ensure_candle_stored(candle)
+        self.event_bus.publish(TimeframeCandleClosedEvent(candle=candle))
+
     def _seed_demo_data_if_enabled(self) -> None:
         if not self.demo_data_enabled or self._demo_seeded:
             return
@@ -597,7 +671,7 @@ class BackendRuntime:
         self._stream_status = event.status
 
     def _binance_component_status(self, fallback: ComponentStatus) -> ComponentStatus:
-        if self.mode is RuntimeMode.DRY_RUN:
+        if self.mode in {RuntimeMode.DRY_RUN, RuntimeMode.HISTORICAL}:
             return ComponentStatus.DISABLED
         if not self.settings.market_data.live_enabled:
             return ComponentStatus.DISABLED
@@ -606,6 +680,8 @@ class BackendRuntime:
     def _binance_component_message(self) -> str:
         if self.mode is RuntimeMode.DRY_RUN:
             return "disabled in dry-run mode"
+        if self.mode is RuntimeMode.HISTORICAL:
+            return "disabled in historical mode"
         if not self.settings.market_data.live_enabled:
             return "disabled by config"
         return f"{self.settings.market_data.exchange}:{self.active_symbol}"
@@ -625,6 +701,21 @@ class BackendRuntime:
         if self._demo_seeded:
             return f"seeded deterministic visualization data for {self.active_symbol}"
         return "ready to seed deterministic visualization data"
+
+    def _historical_component_status(self) -> ComponentStatus:
+        if not self.historical_data_enabled:
+            return ComponentStatus.DISABLED
+        return ComponentStatus.READY if self._historical_loaded else ComponentStatus.READY
+
+    def _historical_component_message(self) -> str:
+        if self.mode is not RuntimeMode.HISTORICAL:
+            return "disabled outside historical mode"
+        if self.historical_config is None:
+            return "historical config missing"
+        request = self.historical_config.request
+        if self._historical_loaded:
+            return f"loaded {self._historical_candle_count} {request.timeframe.value} candles for {request.symbol}"
+        return f"ready to load {request.symbol} {request.timeframe.value}"
 
     def _replay_component_message(self) -> str:
         replay_status = self.replay_status()

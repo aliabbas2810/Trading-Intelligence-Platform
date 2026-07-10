@@ -7,9 +7,9 @@ import pytest
 from backend.engines.historical import (
     HistoricalCandleFileStore,
     HistoricalCandleRequest,
-    HistoricalValidationRunner,
 )
 from backend.engines.historical.loader import candle_from_binance_kline
+from backend.engines.historical.validation import HistoricalValidationRunner
 from backend.models import Candle, Timeframe
 from scripts.validate_historical import main
 

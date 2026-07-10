@@ -6,9 +6,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.api.service import create_app
-from backend.app import BackendRuntime, RuntimeMode, RuntimeState
+from backend.app import BackendRuntime, HistoricalRuntimeConfig, RuntimeMode, RuntimeState
 from backend.app.cli import main
 from backend.config import PlatformSettings, load_settings
+from backend.engines.historical import HistoricalCandleFileStore, HistoricalCandleRequest
 from backend.engines.structure import (
     BreakDirection,
     BreakOfStructure,
@@ -216,6 +217,39 @@ def test_dry_run_demo_mode_returns_non_empty_visualization_api_responses() -> No
     assert alignment_response.status_code == 200
     assert alignment_response.json()["alignment_score"] == 3
     assert alignment_response.json()["bias"] == "bullish"
+
+
+def test_historical_mode_returns_fixture_candles_from_api(tmp_path: Path) -> None:
+    """Covers M28 historical runtime loading through visualization API stores."""
+
+    request = HistoricalCandleRequest(
+        symbol="BTCUSDT",
+        timeframe=Timeframe.ONE_MINUTE,
+        start_time_ms=0,
+        end_time_ms=240_000,
+    )
+    HistoricalCandleFileStore(tmp_path).save(
+        request,
+        (
+            Candle("BTCUSDT", Timeframe.ONE_MINUTE, 0, 60_000, 100.0, 102.0, 99.0, 101.0, 1.0),
+            Candle("BTCUSDT", Timeframe.ONE_MINUTE, 60_000, 120_000, 101.0, 103.0, 100.0, 102.0, 1.0),
+            Candle("BTCUSDT", Timeframe.ONE_MINUTE, 120_000, 180_000, 102.0, 104.0, 101.0, 103.0, 1.0),
+            Candle("BTCUSDT", Timeframe.ONE_MINUTE, 180_000, 240_000, 103.0, 105.0, 102.0, 104.0, 1.0),
+        ),
+    )
+    runtime = BackendRuntime(
+        mode=RuntimeMode.HISTORICAL,
+        historical_config=HistoricalRuntimeConfig(request=request, data_root=tmp_path),
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.get("/api/candles", params={"symbol": "BTCUSDT", "timeframe": "1m"})
+
+    assert response.status_code == 200
+    candles = response.json()
+    assert len(candles) == 4
+    assert candles[0]["open_time_ms"] == 0
+    assert candles[-1]["close"] == 104.0
 
 
 def test_startup_and_shutdown_call_runtime_lifecycle_without_network() -> None:

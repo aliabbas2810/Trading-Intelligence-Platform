@@ -140,6 +140,18 @@ Start the backend API in dry-run mode:
 py -3.12 -m backend.app --api --dry-run --host 127.0.0.1 --port 8000
 ```
 
+Start the backend API with local historical candles:
+
+```powershell
+py -3.12 -m backend.app --api --historical --symbol BTCUSDT --timeframe 1m --start 2025-01-01T00:00:00Z --end 2025-01-01T02:00:00Z --host 127.0.0.1 --port 8000
+```
+
+Add `--download` to fetch Binance candles into `data/historical` before loading them:
+
+```powershell
+py -3.12 -m backend.app --api --historical --symbol BTCUSDT --timeframe 1m --start 2025-01-01T00:00:00Z --end 2025-01-01T02:00:00Z --download --host 127.0.0.1 --port 8000
+```
+
 Start the frontend development server in another terminal:
 
 ```powershell
@@ -203,6 +215,7 @@ npm test
 ## Current Limitations
 
 - Demo data is synthetic.
+- Historical mode loads local/downloaded candle data into the same read APIs as the frontend, but historical replay controls are not implemented yet.
 - Current correctness proves integration consistency, not real-market strategy validity.
 - Real HH/HL/LH/LL, BOS, trend, entry, and risk correctness still needs historical and live-market validation.
 - AI provider is currently deterministic/mock, not a real LLM.
