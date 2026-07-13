@@ -268,6 +268,9 @@ def test_cli_entrypoint_starts_historical_once(
 
     captured = capsys.readouterr()
     assert exit_code == 0
+    assert "Historical preflight:" in captured.out
+    assert "expected_1m_candles=4" in captured.out
+    assert "range is shorter than 1d" in captured.out
     assert '"mode": "historical"' in captured.out
     assert '"state": "running"' in captured.out
 

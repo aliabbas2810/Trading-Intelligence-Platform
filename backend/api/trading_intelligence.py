@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from backend.api.ai import AiDecisionResponse
 from backend.api.checklist import ChecklistResultResponse
 from backend.api.entry import EntryDecisionResponse
+from backend.api.readiness import AnalysisReadinessResponse
 from backend.api.risk import RiskPlanResponse
 from backend.api.scoring import SetupScoreResponse
 from backend.engines.entry.models import MetadataValue
@@ -30,6 +31,7 @@ class TradingIntelligenceResponse(BaseModel):
     checklist: ChecklistResultResponse
     setup_score: SetupScoreResponse
     ai_decision: AiDecisionResponse
+    readiness: AnalysisReadinessResponse | None = None
     metadata: dict[str, MetadataValue]
 
     @classmethod
@@ -42,5 +44,10 @@ class TradingIntelligenceResponse(BaseModel):
             checklist=ChecklistResultResponse.from_result(result.checklist),
             setup_score=SetupScoreResponse.from_score(result.setup_score),
             ai_decision=AiDecisionResponse.from_output(result.ai_decision),
+            readiness=(
+                AnalysisReadinessResponse.from_readiness(result.readiness)
+                if result.readiness is not None
+                else None
+            ),
             metadata=dict(result.metadata),
         )

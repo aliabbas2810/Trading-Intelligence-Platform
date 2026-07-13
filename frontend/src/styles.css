@@ -175,6 +175,73 @@ button {
   margin-top: 8px;
 }
 
+.readiness-panel {
+  background: #111827;
+  border: 1px solid #243044;
+  border-radius: 6px;
+  margin-top: 8px;
+  padding: 8px;
+}
+
+.readiness-summary,
+.readiness-columns,
+.readiness-counts,
+.readiness-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.readiness-summary {
+  align-items: center;
+  color: #cbd5e1;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.readiness-summary strong {
+  color: #e5e7eb;
+}
+
+.readiness-columns {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.readiness-columns div {
+  border: 1px solid #243044;
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
+.readiness-columns span {
+  color: #94a3b8;
+  display: block;
+  font-size: 11px;
+}
+
+.readiness-columns strong {
+  color: #e5e7eb;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.readiness-counts,
+.readiness-reasons {
+  margin-top: 8px;
+}
+
+.readiness-counts span,
+.readiness-reasons span {
+  background: #172033;
+  border: 1px solid #334155;
+  border-radius: 999px;
+  color: #cbd5e1;
+  font-size: 11px;
+  padding: 4px 8px;
+}
+
 .intelligence-reasons span {
   background: #172033;
   border: 1px solid #334155;

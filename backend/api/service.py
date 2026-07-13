@@ -11,6 +11,7 @@ from backend.api.ai import AiDecisionRequest, AiDecisionResponse
 from backend.api.checklist import ChecklistEvaluateRequest, ChecklistResultResponse
 from backend.api.entry import EntryDecisionResponse, EntryEvaluateRequest
 from backend.api.replay import ReplayStartRequest, ReplayStatusResponse
+from backend.api.readiness import AnalysisReadinessResponse
 from backend.api.risk import RiskEvaluateRequest, RiskPlanResponse
 from backend.api.scanner import ScannerRunRequest, ScannerSummaryResponse
 from backend.api.scoring import SetupScoreEvaluateRequest, SetupScoreResponse
@@ -94,6 +95,13 @@ def create_app(runtime: BackendRuntime | None = None) -> FastAPI:
 
         api = runtime_from_request(request).visualization_api
         return jsonable_encoder(api.get_multi_timeframe_alignment(symbol))
+
+    @app.get("/api/data-readiness")
+    def data_readiness(request: Request, symbol: str) -> object:
+        """Return historical/data warm-up diagnostics without recalculating analysis."""
+
+        readiness = runtime_from_request(request).evaluate_data_readiness(symbol=symbol)
+        return AnalysisReadinessResponse.from_readiness(readiness)
 
     @app.post("/api/replay/start")
     def replay_start(request: Request, payload: ReplayStartRequest | None = None) -> object:

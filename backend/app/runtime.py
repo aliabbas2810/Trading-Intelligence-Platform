@@ -20,6 +20,7 @@ from backend.engines.ai import AiDecisionEngine, AiDecisionInput, AiDecisionOutp
 from backend.engines.checklist import ChecklistEngine, ChecklistInput, ChecklistResult
 from backend.engines.entry import DecisionTrace, EntrySignalEngine, EntrySignalInput
 from backend.engines.intelligence import TradingIntelligenceResult
+from backend.engines.readiness import AnalysisReadiness, AnalysisReadinessEngine
 from backend.engines.historical import (
     BinanceHistoricalCandleDownloader,
     HistoricalCandleFileStore,
@@ -188,6 +189,11 @@ class BackendRuntime:
         self.risk_engine = RiskEngine()
         self.checklist_engine = ChecklistEngine()
         self.setup_scoring_engine = SetupScoringEngine()
+        self.readiness_engine = AnalysisReadinessEngine(
+            self.candle_store,
+            self.structure_store,
+            self.trend_store,
+        )
         self.replay_controller = ReplayController(
             self.event_bus,
             HistoricalTradeReplaySource(()),
@@ -343,6 +349,11 @@ class BackendRuntime:
         self.risk_engine = RiskEngine()
         self.checklist_engine = ChecklistEngine()
         self.setup_scoring_engine = SetupScoringEngine()
+        self.readiness_engine = AnalysisReadinessEngine(
+            self.candle_store,
+            self.structure_store,
+            self.trend_store,
+        )
         self._structure_engines = {}
         self._trend_engines = {}
         self._trend_snapshots = {}
@@ -423,6 +434,18 @@ class BackendRuntime:
         """Evaluate entry state from existing stores for ENTRY-001 through ENTRY-006."""
 
         return self.entry_signal_engine.evaluate(self._entry_signal_input_for(symbol))
+
+    def evaluate_data_readiness(self, *, symbol: str) -> AnalysisReadiness:
+        """Evaluate historical/data warm-up readiness from existing read stores."""
+
+        alignment = self.alignment_store.get(symbol)
+        return self.readiness_engine.evaluate(
+            symbol=symbol,
+            alignment_missing_timeframes=(
+                alignment.missing_timeframes if alignment is not None else ()
+            ),
+            alignment_score=alignment.alignment_score if alignment is not None else None,
+        )
 
     def evaluate_risk(
         self,
@@ -555,6 +578,7 @@ class BackendRuntime:
             checklist_result=checklist_result,
             setup_score=setup_score,
         )
+        readiness = self.evaluate_data_readiness(symbol=symbol)
         return TradingIntelligenceResult(
             symbol=symbol,
             timeframe=timeframe,
@@ -563,11 +587,14 @@ class BackendRuntime:
             checklist=checklist_result,
             setup_score=setup_score,
             ai_decision=ai_decision,
+            readiness=readiness,
             metadata={
                 "execution_order": "entry,risk,checklist,score,ai",
                 "runtime_state": self.state.value,
                 "mode": self.mode.value,
                 "minimum_risk_reward": minimum_risk_reward,
+                "readiness_state": readiness.overall_state.value,
+                "readiness_reason": readiness.reason,
             },
         )
 

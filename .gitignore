@@ -17,6 +17,7 @@ build/
 /data/logs/*.log
 /data/raw/*
 /data/replay/*
+/data/historical/
 
 # Environment
 .env

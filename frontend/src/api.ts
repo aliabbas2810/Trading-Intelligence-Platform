@@ -1,5 +1,6 @@
 import type {
   CandleDto,
+  AnalysisReadinessDto,
   HealthStatusDto,
   MultiTimeframeAlignmentDto,
   ReplaySourceType,
@@ -54,6 +55,10 @@ export function fetchTrendState(symbol: string, timeframe: Timeframe): Promise<T
 
 export function fetchMultiTimeframeAlignment(symbol: string): Promise<MultiTimeframeAlignmentDto> {
   return getJson<MultiTimeframeAlignmentDto>(`/multi-timeframe-alignment?${query({ symbol })}`);
+}
+
+export function fetchDataReadiness(symbol: string): Promise<AnalysisReadinessDto> {
+  return getJson<AnalysisReadinessDto>(`/data-readiness?${query({ symbol })}`);
 }
 
 export function fetchHealthStatus(): Promise<HealthStatusDto> {

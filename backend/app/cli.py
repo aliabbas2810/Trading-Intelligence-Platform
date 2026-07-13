@@ -10,6 +10,7 @@ from backend.api.service import create_app
 from backend.engines.historical import HistoricalCandleRequest
 from backend.engines.historical.loader import parse_utc_timestamp_ms
 from backend.models import Timeframe
+from backend.pipelines.timeframe.aggregation import DAILY_MS, WEEKLY_MS
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -38,6 +39,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     mode = runtime_mode_from_args(args)
+    if mode is RuntimeMode.HISTORICAL:
+        print_historical_preflight(args)
     runtime = BackendRuntime(
         mode=mode,
         historical_config=historical_config_from_args(args) if mode is RuntimeMode.HISTORICAL else None,
@@ -95,3 +98,22 @@ def historical_config_from_args(args: argparse.Namespace) -> HistoricalRuntimeCo
         data_root=Path(args.data_root),
         download=args.download,
     )
+
+
+def print_historical_preflight(args: argparse.Namespace) -> None:
+    """Print non-blocking M28.1 historical warm-up diagnostics before runtime start."""
+
+    if args.start is None or args.end is None:
+        return
+    start_time_ms = parse_utc_timestamp_ms(args.start)
+    end_time_ms = parse_utc_timestamp_ms(args.end)
+    expected_one_minute_candles = max(0, (end_time_ms - start_time_ms) // 60_000)
+    print(
+        "Historical preflight: "
+        f"symbol={args.symbol.upper()} start={args.start} end={args.end} "
+        f"expected_1m_candles={expected_one_minute_candles}",
+    )
+    if end_time_ms - start_time_ms < DAILY_MS:
+        print("Historical preflight warning: range is shorter than 1d; daily/weekly analysis will be unavailable.")
+    elif end_time_ms - start_time_ms < WEEKLY_MS:
+        print("Historical preflight warning: range is shorter than 1w; weekly analysis will be unavailable.")

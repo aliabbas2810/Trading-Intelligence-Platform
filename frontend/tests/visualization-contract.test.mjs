@@ -24,6 +24,7 @@ test("frontend fetches backend read endpoints", () => {
   assert.match(apiSource, /\/market-structure/);
   assert.match(apiSource, /\/trend-state/);
   assert.match(apiSource, /\/multi-timeframe-alignment/);
+  assert.match(apiSource, /\/data-readiness/);
   assert.match(apiSource, /\/health/);
   assert.match(apiSource, /URLSearchParams/);
 });
@@ -207,7 +208,32 @@ test("trading intelligence panel exposes loading error missing and valid states"
   assert.match(appSource, /Loading intelligence/);
   assert.match(appSource, /Backend intelligence loaded/);
   assert.match(appSource, /Intelligence error:/);
-  assert.match(appSource, /Missing data/);
+  assert.match(appSource, /Readiness:/);
+  assert.match(appSource, /No trading intelligence response yet\./);
+  assert.match(appSource, /role="alert"/);
+});
+
+test("frontend renders backend readiness diagnostics for historical warm-up", () => {
+  assert.match(apiSource, /fetchDataReadiness/);
+  assert.match(apiSource, /\/data-readiness/);
+  assert.match(typeSource, /AnalysisReadinessDto/);
+  assert.match(appSource, /ReadinessPanel/);
+  assert.match(appSource, /Data readiness/);
+  assert.match(appSource, /Available timeframes/);
+  assert.match(appSource, /Missing timeframes/);
+  assert.match(appSource, /candle_counts_by_timeframe/);
+  assert.match(appSource, /structure_readiness_by_timeframe/);
+  assert.match(appSource, /trend_readiness_by_timeframe/);
+  assert.match(appSource, /WAIT is from insufficient or warming-up historical data\./);
+  assert.match(appSource, /WAIT is from neutral or weak market conditions\./);
+});
+
+test("readiness UI does not calculate analysis algorithms locally", () => {
+  assert.doesNotMatch(appSource, /MarketStructureEngine|TrendEngine|EntrySignalEngine|RiskEngine/i);
+  assert.doesNotMatch(appSource, /detectSwing|detectBos|calculateTrend|calculateEntry|calculateRisk/i);
+  assert.doesNotMatch(appSource, /body_high|body_low|bodyHigh|bodyLow/i);
+  assert.match(appSource, /readiness\.missing_timeframes/);
+  assert.match(appSource, /readiness\.missing_reasons/);
   assert.match(appSource, /No trading intelligence response yet\./);
   assert.match(appSource, /role="alert"/);
 });

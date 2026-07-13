@@ -27,6 +27,7 @@ from backend.engines.trend import (
     TrendUpdate,
 )
 from backend.models import Candle, Timeframe
+from backend.pipelines.timeframe.aggregation import timeframe_duration_ms
 
 
 class RecordingRuntime(BackendRuntime):
@@ -250,6 +251,109 @@ def test_historical_mode_returns_fixture_candles_from_api(tmp_path: Path) -> Non
     assert len(candles) == 4
     assert candles[0]["open_time_ms"] == 0
     assert candles[-1]["close"] == 104.0
+
+
+def test_data_readiness_reports_insufficient_higher_timeframes_for_short_history(tmp_path: Path) -> None:
+    """Covers M28.1 insufficient historical warm-up diagnostics and TEST-001."""
+
+    request = HistoricalCandleRequest(
+        symbol="BTCUSDT",
+        timeframe=Timeframe.ONE_MINUTE,
+        start_time_ms=0,
+        end_time_ms=120 * 60_000,
+    )
+    HistoricalCandleFileStore(tmp_path).save(request, make_minute_fixture_candles(count=120))
+    runtime = BackendRuntime(
+        mode=RuntimeMode.HISTORICAL,
+        historical_config=HistoricalRuntimeConfig(request=request, data_root=tmp_path),
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        readiness = client.get("/api/data-readiness", params={"symbol": "BTCUSDT"})
+        intelligence = client.post(
+            "/api/trading-intelligence/evaluate",
+            json={"symbol": "BTCUSDT", "timeframe": "4h"},
+        )
+
+    assert readiness.status_code == 200
+    readiness_payload = readiness.json()
+    assert readiness_payload["overall_state"] == "INSUFFICIENT_DATA"
+    assert readiness_payload["reason"] == "insufficient_historical_range"
+    assert readiness_payload["candle_counts_by_timeframe"][-1] == {
+        "timeframe": "1m",
+        "candle_count": 120,
+        "available": True,
+    }
+    assert {"1w", "1d", "4h"}.issubset(set(readiness_payload["missing_timeframes"]))
+
+    assert intelligence.status_code == 200
+    intelligence_payload = intelligence.json()
+    assert intelligence_payload["entry_decision"]["state"] == "WAIT"
+    assert intelligence_payload["metadata"]["readiness_state"] == "INSUFFICIENT_DATA"
+    assert intelligence_payload["readiness"]["reason"] == "insufficient_historical_range"
+
+
+def test_readiness_reports_generated_higher_timeframes_for_long_fixture(tmp_path: Path) -> None:
+    """Long historical fixtures report available generated higher timeframe candle data."""
+
+    request = HistoricalCandleRequest(
+        symbol="BTCUSDT",
+        timeframe=Timeframe.ONE_MINUTE,
+        start_time_ms=0,
+        end_time_ms=10_080 * 60_000,
+    )
+    HistoricalCandleFileStore(tmp_path).save(request, make_minute_fixture_candles(count=10_080))
+    runtime = BackendRuntime(
+        mode=RuntimeMode.HISTORICAL,
+        historical_config=HistoricalRuntimeConfig(request=request, data_root=tmp_path),
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.get("/api/data-readiness", params={"symbol": "BTCUSDT"})
+
+    assert response.status_code == 200
+    candle_counts = {
+        item["timeframe"]: item["candle_count"]
+        for item in response.json()["candle_counts_by_timeframe"]
+    }
+    assert candle_counts["1w"] == 1
+    assert candle_counts["1d"] == 7
+    assert candle_counts["4h"] == 42
+    assert "1w" in response.json()["available_timeframes"]
+
+
+def test_wait_due_to_weak_alignment_is_distinct_from_insufficient_data() -> None:
+    """Complete readiness plus weak alignment remains a market-condition WAIT."""
+
+    runtime = BackendRuntime(settings=demo_disabled_settings(), mode=RuntimeMode.DRY_RUN)
+    seed_entry_ready_symbol(runtime, "BTCUSDT")
+    seed_required_candles(runtime, "BTCUSDT")
+    runtime.alignment_store.set(
+        MultiTimeframeTrendResult(
+            symbol="BTCUSDT",
+            mode=MultiTimeframeMode.VOTING,
+            bias=DirectionalBias.NEUTRAL,
+            alignment_score=0,
+            required_timeframes=(Timeframe.WEEKLY, Timeframe.DAILY, Timeframe.FOUR_HOUR),
+            present_timeframes=(Timeframe.WEEKLY, Timeframe.DAILY, Timeframe.FOUR_HOUR),
+            missing_timeframes=(),
+            snapshots=(),
+            reason="weak-alignment-test",
+        ),
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/trading-intelligence/evaluate",
+            json={"symbol": "BTCUSDT", "timeframe": "4h"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["entry_decision"]["state"] == "WAIT"
+    assert payload["metadata"]["readiness_state"] == "READY"
+    assert payload["readiness"]["overall_state"] == "READY"
+    assert payload["entry_decision"]["reasons"] == ["alignment_weak_or_neutral"]
 
 
 def test_startup_and_shutdown_call_runtime_lifecycle_without_network() -> None:
@@ -704,6 +808,7 @@ def test_api_layer_does_not_recompute_analysis_logic() -> None:
             Path("backend/api/checklist.py").read_text(encoding="utf-8"),
             Path("backend/api/scoring.py").read_text(encoding="utf-8"),
             Path("backend/api/trading_intelligence.py").read_text(encoding="utf-8"),
+            Path("backend/api/readiness.py").read_text(encoding="utf-8"),
         ),
     )
 
@@ -906,6 +1011,56 @@ def seed_entry_ready_symbol(runtime: BackendRuntime, symbol: str) -> None:
             volume=1.0,
         ),
     )
+
+
+def seed_required_candles(runtime: BackendRuntime, symbol: str) -> None:
+    for timeframe in (
+        Timeframe.WEEKLY,
+        Timeframe.DAILY,
+        Timeframe.FOUR_HOUR,
+        Timeframe.TWO_HOUR,
+        Timeframe.ONE_HOUR,
+        Timeframe.THIRTY_MINUTE,
+        Timeframe.FIFTEEN_MINUTE,
+        Timeframe.FIVE_MINUTE,
+    ):
+        duration_ms = timeframe_duration_ms(timeframe)
+        runtime.candle_store.save(
+            Candle(
+                symbol=symbol,
+                timeframe=timeframe,
+                open_time_ms=0,
+                close_time_ms=duration_ms,
+                open=100.0,
+                high=110.0,
+                low=95.0,
+                close=105.0,
+                volume=1.0,
+            ),
+        )
+
+
+def make_minute_fixture_candles(*, count: int) -> tuple[Candle, ...]:
+    candles: list[Candle] = []
+    close = 100.0
+    for index in range(count):
+        open_price = close
+        close = open_price + (1.0 if index % 2 == 0 else -0.25)
+        open_time_ms = index * 60_000
+        candles.append(
+            Candle(
+                symbol="BTCUSDT",
+                timeframe=Timeframe.ONE_MINUTE,
+                open_time_ms=open_time_ms,
+                close_time_ms=open_time_ms + 60_000,
+                open=open_price,
+                high=max(open_price, close) + 1.0,
+                low=min(open_price, close) - 1.0,
+                close=close,
+                volume=1.0,
+            ),
+        )
+    return tuple(candles)
 
 
 def trend_state_for_bias(bias: DirectionalBias) -> TrendState:

@@ -11,6 +11,7 @@ import React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchCandles,
+  fetchDataReadiness,
   fetchHealthStatus,
   fetchMarketStructure,
   fetchMultiTimeframeAlignment,
@@ -28,6 +29,7 @@ import {
 import { POLL_INTERVAL_MS } from "../config";
 import type {
   BosMode,
+  AnalysisReadinessDto,
   BreakOfStructureDto,
   CandleDto,
   HealthStatusDto,
@@ -51,6 +53,7 @@ interface VisualizationData {
   trend: TrendSnapshotDto;
   alignmentScore: number;
   health: HealthStatusDto | null;
+  readiness: AnalysisReadinessDto | null;
 }
 
 export function VisualizationApp() {
@@ -88,6 +91,7 @@ export function VisualizationApp() {
     trend: { update: null },
     alignmentScore: 0,
     health: null,
+    readiness: null,
   });
 
   useEffect(() => {
@@ -96,12 +100,13 @@ export function VisualizationApp() {
       setLoading(true);
       setErrorMessage(null);
       try {
-        const [candles, structure, trend, alignment, health] = await Promise.all([
+        const [candles, structure, trend, alignment, health, readiness] = await Promise.all([
           fetchCandles(symbol, timeframe),
           fetchMarketStructure(symbol, timeframe),
           fetchTrendState(symbol, timeframe),
           fetchMultiTimeframeAlignment(symbol),
           fetchHealthStatus(),
+          fetchDataReadiness(symbol),
         ]);
         if (!active) {
           return;
@@ -112,6 +117,7 @@ export function VisualizationApp() {
           trend,
           alignmentScore: alignment?.alignment_score ?? 0,
           health,
+          readiness,
         });
         setLastRefreshTime(new Date().toLocaleTimeString());
       } catch (error) {
@@ -351,6 +357,7 @@ export function VisualizationApp() {
       ) : null}
       <TradingIntelligencePanel
         intelligence={intelligence}
+        readiness={data.readiness}
         loading={intelligenceLoading}
         error={intelligenceError}
       />
@@ -402,10 +409,12 @@ export function VisualizationApp() {
 
 function TradingIntelligencePanel({
   intelligence,
+  readiness,
   loading,
   error,
 }: {
   intelligence: TradingIntelligenceDto | null;
+  readiness: AnalysisReadinessDto | null;
   loading: boolean;
   error: string | null;
 }) {
@@ -416,6 +425,8 @@ function TradingIntelligencePanel({
   const ai = intelligence?.ai_decision;
   const hasMissingData =
     intelligence !== null && (entry?.state === "WAIT" || checklist?.missing_count !== 0 || risk?.state === "INCOMPLETE");
+  const effectiveReadiness = intelligence?.readiness ?? readiness;
+  const readinessExplanation = readinessExplanationFor(entry?.state, effectiveReadiness?.overall_state);
   const reasons = [...(entry?.reasons ?? []), ...(risk?.reasons ?? []), ...(ai?.reasons.map((item) => item.message ?? item.evidence ?? "") ?? [])]
     .filter(Boolean)
     .slice(0, 5);
@@ -426,7 +437,7 @@ function TradingIntelligencePanel({
         <strong>Trading Intelligence</strong>
         <span>{loading ? "Loading intelligence" : "Backend intelligence loaded"}</span>
         {error ? <strong role="alert">Intelligence error: {error}</strong> : null}
-        {hasMissingData ? <span className="muted-warning">Missing data</span> : null}
+        {hasMissingData ? <span className="muted-warning">Readiness: {effectiveReadiness?.overall_state ?? "missing"}</span> : null}
       </div>
       {intelligence === null && !loading && error === null ? (
         <div className="intelligence-empty">No trading intelligence response yet.</div>
@@ -450,6 +461,9 @@ function TradingIntelligencePanel({
             <Metric label="AI confidence" value={formatPercent(ai?.confidence)} />
           </div>
           <p className="ai-explanation">{ai?.explanation ?? "AI explanation unavailable."}</p>
+          {effectiveReadiness ? (
+            <ReadinessPanel readiness={effectiveReadiness} explanation={readinessExplanation} />
+          ) : null}
           <div className="intelligence-reasons">
             {reasons.length > 0 ? reasons.map((reason) => <span key={reason}>{reason}</span>) : <span>No reasons supplied.</span>}
           </div>
@@ -457,6 +471,88 @@ function TradingIntelligencePanel({
       ) : null}
     </section>
   );
+}
+
+function ReadinessPanel({
+  readiness,
+  explanation,
+}: {
+  readiness: AnalysisReadinessDto;
+  explanation: string;
+}) {
+  return (
+    <div className="readiness-panel" aria-label="Data readiness panel">
+      <div className="readiness-summary">
+        <strong>Data readiness</strong>
+        <span>{readiness.overall_state}</span>
+        <span>{readiness.reason}</span>
+        <span>{explanation}</span>
+      </div>
+      <div className="readiness-columns">
+        <div>
+          <span>Available timeframes</span>
+          <strong>{readiness.available_timeframes.join(", ") || "none"}</strong>
+        </div>
+        <div>
+          <span>Missing timeframes</span>
+          <strong>{readiness.missing_timeframes.join(", ") || "none"}</strong>
+        </div>
+        <div>
+          <span>Entry readiness</span>
+          <strong>{readiness.entry_readiness ? "ready" : "not ready"}</strong>
+        </div>
+        <div>
+          <span>Alignment</span>
+          <strong>
+            {readiness.alignment_readiness.ready
+              ? `${readiness.alignment_readiness.alignment_score}/3`
+              : `missing ${readiness.alignment_readiness.missing_timeframes.join(", ") || "alignment"}`}
+          </strong>
+        </div>
+      </div>
+      <div className="readiness-counts">
+        {readiness.candle_counts_by_timeframe.map((item) => (
+          <span key={item.timeframe}>
+            {item.timeframe}: {item.candle_count}
+          </span>
+        ))}
+      </div>
+      <div className="readiness-counts">
+        {readiness.trend_readiness_by_timeframe.map((item) => (
+          <span key={item.timeframe}>
+            {item.timeframe} trend: {item.ready ? item.state : "missing"}
+          </span>
+        ))}
+      </div>
+      <div className="readiness-counts">
+        {readiness.structure_readiness_by_timeframe.map((item) => (
+          <span key={item.timeframe}>
+            {item.timeframe} structure: {item.swing_count} swings / {item.bos_count} BOS
+          </span>
+        ))}
+      </div>
+      {readiness.missing_reasons.length > 0 ? (
+        <div className="readiness-reasons">
+          {readiness.missing_reasons.map((reason) => (
+            <span key={reason}>{reason}</span>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function readinessExplanationFor(entryState: string | undefined, readinessState: string | undefined): string {
+  if (entryState === "WAIT" && readinessState === "READY") {
+    return "WAIT is from neutral or weak market conditions.";
+  }
+  if (entryState === "WAIT") {
+    return "WAIT is from insufficient or warming-up historical data.";
+  }
+  if (readinessState !== "READY") {
+    return "Historical data is still warming up required inputs.";
+  }
+  return "Required inputs are ready.";
 }
 
 function Metric({ label, value }: { label: string; value: string }) {

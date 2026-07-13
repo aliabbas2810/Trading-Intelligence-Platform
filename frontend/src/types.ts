@@ -67,6 +67,46 @@ export interface MultiTimeframeAlignmentDto {
   reason: string;
 }
 
+export interface TimeframeCandleReadinessDto {
+  timeframe: Timeframe;
+  candle_count: number;
+  available: boolean;
+}
+
+export interface StructureTimeframeReadinessDto {
+  timeframe: Timeframe;
+  ready: boolean;
+  swing_count: number;
+  bos_count: number;
+}
+
+export interface TrendTimeframeReadinessDto {
+  timeframe: Timeframe;
+  ready: boolean;
+  state: TrendState | null;
+}
+
+export interface AlignmentReadinessDto {
+  ready: boolean;
+  alignment_score: number | null;
+  missing_timeframes: Timeframe[];
+}
+
+export interface AnalysisReadinessDto {
+  symbol: string;
+  required_timeframes: Timeframe[];
+  available_timeframes: Timeframe[];
+  missing_timeframes: Timeframe[];
+  candle_counts_by_timeframe: TimeframeCandleReadinessDto[];
+  structure_readiness_by_timeframe: StructureTimeframeReadinessDto[];
+  trend_readiness_by_timeframe: TrendTimeframeReadinessDto[];
+  alignment_readiness: AlignmentReadinessDto;
+  entry_readiness: boolean;
+  overall_state: "READY" | "WARMING_UP" | "INSUFFICIENT_DATA";
+  reason: string;
+  missing_reasons: string[];
+}
+
 export interface HealthStatusDto {
   state: string;
   mode: string;
@@ -180,5 +220,6 @@ export interface TradingIntelligenceDto {
     reasons: EvidenceDto[];
     provider: string;
   };
+  readiness: AnalysisReadinessDto | null;
   metadata: Record<string, string | number | boolean | null>;
 }
