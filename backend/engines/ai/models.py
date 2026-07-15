@@ -73,6 +73,8 @@ class AiDecisionInput:
     setup_grade: ScoreGrade | None = None
     setup_score_percentage: float | None = None
     risk_reward_ratio: float | None = None
+    aoi_gate_eligible: bool | None = None
+    aoi_reason_codes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.symbol:

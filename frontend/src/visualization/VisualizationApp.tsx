@@ -11,6 +11,8 @@ import React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchCandles,
+  fetchAoiLocation,
+  fetchAois,
   fetchDataReadiness,
   fetchHealthStatus,
   fetchMarketStructure,
@@ -29,6 +31,10 @@ import {
 import { POLL_INTERVAL_MS } from "../config";
 import type {
   BosMode,
+  AoiDto,
+  AoiGateDto,
+  AoiOverlapDto,
+  AoiStateFilter,
   AnalysisReadinessDto,
   BreakOfStructureDto,
   CandleDto,
@@ -54,6 +60,9 @@ interface VisualizationData {
   alignmentScore: number;
   health: HealthStatusDto | null;
   readiness: AnalysisReadinessDto | null;
+  aois: AoiDto[];
+  aoiOverlaps: AoiOverlapDto[];
+  aoiGate: AoiGateDto | null;
 }
 
 export function VisualizationApp() {
@@ -63,6 +72,11 @@ export function VisualizationApp() {
   const [bosMode, setBosMode] = useState<BosMode>("permanent");
   const [trendBackground, setTrendBackground] = useState(true);
   const [trendRibbon, setTrendRibbon] = useState(true);
+  const [aoiVisible, setAoiVisible] = useState(true);
+  const [weeklyAoiVisible, setWeeklyAoiVisible] = useState(true);
+  const [dailyAoiVisible, setDailyAoiVisible] = useState(true);
+  const [aoiOverlapVisible, setAoiOverlapVisible] = useState(true);
+  const [aoiStateFilter, setAoiStateFilter] = useState<AoiStateFilter>("active");
   const [replaySource, setReplaySource] = useState<ReplaySourceType>("candles");
   const [replaySpeed, setReplaySpeed] = useState(1);
   const [replayStartIndex, setReplayStartIndex] = useState(0);
@@ -92,6 +106,9 @@ export function VisualizationApp() {
     alignmentScore: 0,
     health: null,
     readiness: null,
+    aois: [],
+    aoiOverlaps: [],
+    aoiGate: null,
   });
 
   useEffect(() => {
@@ -100,13 +117,15 @@ export function VisualizationApp() {
       setLoading(true);
       setErrorMessage(null);
       try {
-        const [candles, structure, trend, alignment, health, readiness] = await Promise.all([
+        const [candles, structure, trend, alignment, health, readiness, aoiRead, aoiGate] = await Promise.all([
           fetchCandles(symbol, timeframe),
           fetchMarketStructure(symbol, timeframe),
           fetchTrendState(symbol, timeframe),
           fetchMultiTimeframeAlignment(symbol),
           fetchHealthStatus(),
           fetchDataReadiness(symbol),
+          fetchAois(symbol, aoiStateFilter),
+          fetchAoiLocation(symbol),
         ]);
         if (!active) {
           return;
@@ -118,6 +137,9 @@ export function VisualizationApp() {
           alignmentScore: alignment?.alignment_score ?? 0,
           health,
           readiness,
+          aois: aoiRead.aois,
+          aoiOverlaps: aoiRead.overlaps,
+          aoiGate,
         });
         setLastRefreshTime(new Date().toLocaleTimeString());
       } catch (error) {
@@ -134,7 +156,7 @@ export function VisualizationApp() {
     return () => {
       active = false;
     };
-  }, [symbol, timeframe, refreshKey]);
+  }, [symbol, timeframe, aoiStateFilter, refreshKey]);
 
   useEffect(() => {
     if (POLL_INTERVAL_MS <= 0) {
@@ -226,6 +248,23 @@ export function VisualizationApp() {
     () => filterTrendForReplayCursor(data.trend, replayCursorTimeMs),
     [data.trend, replayCursorTimeMs],
   );
+  const visibleAois = useMemo(
+    () =>
+      filterAoisForReplayCursor(
+        data.aois.filter(
+          (item) =>
+            aoiVisible &&
+            ((item.timeframe === "1w" && weeklyAoiVisible) ||
+              (item.timeframe === "1d" && dailyAoiVisible)),
+        ),
+        replayCursorTimeMs,
+      ),
+    [data.aois, aoiVisible, weeklyAoiVisible, dailyAoiVisible, replayCursorTimeMs],
+  );
+  const visibleAoiOverlaps = useMemo(
+    () => filterAoiOverlaps(data.aoiOverlaps, visibleAois, aoiVisible && aoiOverlapVisible),
+    [data.aoiOverlaps, visibleAois, aoiVisible, aoiOverlapVisible],
+  );
   const trendState = visibleTrend.update?.state ?? "transition";
   const visibleBos = useMemo(
     () => selectVisibleBos(visibleStructure.breaks_of_structure, bosMode),
@@ -243,6 +282,10 @@ export function VisualizationApp() {
   const bosCount = visibleStructure.breaks_of_structure.length;
   const runtimeMode = data.health?.mode ?? "mode unknown";
   const replayState = replayStatus?.status ?? "replay unknown";
+  const aoiMissingMessage =
+    !loading && data.aois.length === 0
+      ? "Weekly/Daily AOI inputs are not ready or no active AOIs are cached yet."
+      : null;
 
   async function runReplayAction(action: () => Promise<ReplayStatusDto>): Promise<void> {
     setReplayLoading(true);
@@ -330,6 +373,28 @@ export function VisualizationApp() {
             <Ribbon size={16} />
             Ribbon
           </button>
+          <button type="button" onClick={() => setAoiVisible((value) => !value)} title="Toggle AOI visibility">
+            {aoiVisible ? <Eye size={16} /> : <EyeOff size={16} />}
+            AOI
+          </button>
+          <button type="button" onClick={() => setWeeklyAoiVisible((value) => !value)} title="Toggle Weekly AOI">
+            W AOI
+          </button>
+          <button type="button" onClick={() => setDailyAoiVisible((value) => !value)} title="Toggle Daily AOI">
+            D AOI
+          </button>
+          <button type="button" onClick={() => setAoiOverlapVisible((value) => !value)} title="Toggle AOI overlap">
+            W+D
+          </button>
+          <select
+            aria-label="AOI state filter"
+            value={aoiStateFilter}
+            onChange={(event) => setAoiStateFilter(event.target.value as AoiStateFilter)}
+          >
+            <option value="active">active only</option>
+            <option value="active_broken">active+broken</option>
+            <option value="all">all</option>
+          </select>
           <button type="button" onClick={() => setRefreshKey((value) => value + 1)} title="Refresh backend data">
             <RefreshCw size={16} />
             Refresh
@@ -342,6 +407,8 @@ export function VisualizationApp() {
         <span>Candles: {visibleCandles.length}</span>
         <span>Structure: {structureCount}</span>
         <span>BOS: {bosCount}</span>
+        <span>AOIs: {visibleAois.length}/{data.aois.length}</span>
+        <span>AOI gate: {data.aoiGate?.eligible ? "eligible" : "closed"}</span>
         <span>Trend: {trendState}</span>
         <span>Replay: {replayState}</span>
         <span>Replay cursor: {replayStatus ? `${replayStatus.processed_events}/${replayStatus.total_events}` : "off"}</span>
@@ -398,10 +465,13 @@ export function VisualizationApp() {
         <section className="chart-message" role="status">{replayNoCandlesMessage}</section>
       ) : null}
       {chartDataMessage ? <section className="chart-message" role="status">{chartDataMessage}</section> : null}
+      {aoiMissingMessage ? <section className="chart-message" role="status">{aoiMissingMessage}</section> : null}
       <ChartCanvas
         candles={visibleCandles}
         structure={visibleStructure}
         bos={bosVisible ? visibleBos : []}
+        aois={visibleAois}
+        aoiOverlaps={visibleAoiOverlaps}
       />
     </main>
   );
@@ -464,6 +534,7 @@ function TradingIntelligencePanel({
           {effectiveReadiness ? (
             <ReadinessPanel readiness={effectiveReadiness} explanation={readinessExplanation} />
           ) : null}
+          {intelligence.aoi_gate ? <AoiReadinessPanel gate={intelligence.aoi_gate} /> : null}
           <div className="intelligence-reasons">
             {reasons.length > 0 ? reasons.map((reason) => <span key={reason}>{reason}</span>) : <span>No reasons supplied.</span>}
           </div>
@@ -542,6 +613,30 @@ function ReadinessPanel({
   );
 }
 
+function AoiReadinessPanel({ gate }: { gate: AoiGateDto }) {
+  return (
+    <div className="aoi-readiness" aria-label="AOI readiness panel">
+      <div className="readiness-summary">
+        <strong>AOI location gate</strong>
+        <span>{gate.eligible ? "eligible" : "not eligible"}</span>
+        <span>{gate.reason_codes.join(", ") || "no AOI reasons"}</span>
+      </div>
+      <div className="readiness-counts">
+        {gate.active_aois.map((area) => (
+          <span key={area.aoi_id}>
+            {area.timeframe === "1w" ? "Weekly AOI" : "Daily AOI"} {area.state} {formatNumber(area.lower)}-{formatNumber(area.upper)}
+          </span>
+        ))}
+        {gate.overlaps.map((overlap) => (
+          <span key={`${overlap.weekly_aoi_id}-${overlap.daily_aoi_id}`}>
+            W+D CONFLUENCE {formatNumber(overlap.lower)}-{formatNumber(overlap.upper)}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function readinessExplanationFor(entryState: string | undefined, readinessState: string | undefined): string {
   if (entryState === "WAIT" && readinessState === "READY") {
     return "WAIT is from neutral or weak market conditions.";
@@ -601,6 +696,27 @@ function filterTrendForReplayCursor(trend: TrendSnapshotDto, cursorTimeMs: numbe
     return trend;
   }
   return { update: null };
+}
+
+function filterAoisForReplayCursor(aois: AoiDto[], cursorTimeMs: number | null): AoiDto[] {
+  if (cursorTimeMs === null) {
+    return aois;
+  }
+  return aois.filter(
+    (area) =>
+      area.first_touch_time_ms <= cursorTimeMs &&
+      (area.confirmation_time_ms === null || area.confirmation_time_ms <= cursorTimeMs),
+  );
+}
+
+function filterAoiOverlaps(overlaps: AoiOverlapDto[], aois: AoiDto[], visible: boolean): AoiOverlapDto[] {
+  if (!visible) {
+    return [];
+  }
+  const visibleIds = new Set(aois.map((area) => area.aoi_id));
+  return overlaps.filter(
+    (overlap) => visibleIds.has(overlap.weekly_aoi_id) && visibleIds.has(overlap.daily_aoi_id),
+  );
 }
 
 function ScannerPanel({
@@ -834,10 +950,14 @@ function ChartCanvas({
   candles,
   structure,
   bos,
+  aois,
+  aoiOverlaps,
 }: {
   candles: CandleDto[];
   structure: StructureSnapshotDto;
   bos: BreakOfStructureDto[];
+  aois: AoiDto[];
+  aoiOverlaps: AoiOverlapDto[];
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -909,14 +1029,54 @@ function ChartCanvas({
         title: `BOS ${item.direction}`,
       });
     }
+    for (const area of aois) {
+      series.createPriceLine({
+        price: area.upper,
+        color: colorForAoi(area),
+        lineWidth: area.timeframe === "1w" ? 2 : 1,
+        lineStyle: 1,
+        axisLabelVisible: true,
+        title: area.timeframe === "1w" ? "WEEKLY AOI" : "DAILY AOI",
+      });
+      series.createPriceLine({
+        price: area.lower,
+        color: colorForAoi(area),
+        lineWidth: area.timeframe === "1w" ? 2 : 1,
+        lineStyle: 1,
+        axisLabelVisible: true,
+        title: area.timeframe === "1w" ? "WEEKLY AOI" : "DAILY AOI",
+      });
+    }
     chartRef.current?.timeScale().fitContent();
-  }, [candles, structure, bos]);
+  }, [candles, structure, bos, aois]);
 
   return (
     <section className="chart-frame">
       {chartError ? <div className="chart-error" role="alert">Chart error: {chartError}</div> : null}
+      <AoiOverlay aois={aois} overlaps={aoiOverlaps} />
       <div ref={containerRef} className="chart-surface" />
     </section>
+  );
+}
+
+function AoiOverlay({ aois, overlaps }: { aois: AoiDto[]; overlaps: AoiOverlapDto[] }) {
+  return (
+    <div className="aoi-overlay" aria-label="AOI overlay">
+      {aois.map((area) => (
+        <div key={area.aoi_id} className={`aoi-box aoi-${area.timeframe} state-${area.state}`}>
+          <strong>{area.timeframe === "1w" ? "WEEKLY AOI" : "DAILY AOI"}</strong>
+          <span>{area.direction}</span>
+          <span>{formatNumber(area.lower)}-{formatNumber(area.upper)}</span>
+          <span>{area.confirmation_time_ms ? "tradable" : "candidate"}</span>
+        </div>
+      ))}
+      {overlaps.map((overlap) => (
+        <div key={`${overlap.weekly_aoi_id}-${overlap.daily_aoi_id}`} className="aoi-confluence">
+          <strong>W+D CONFLUENCE</strong>
+          <span>{formatNumber(overlap.lower)}-{formatNumber(overlap.upper)}</span>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -936,6 +1096,13 @@ function colorForStructureLabel(label: string): string {
   if (label === "LH") return "#f59e0b";
   if (label === "LL") return "#ef4444";
   return "#94a3b8";
+}
+
+function colorForAoi(area: AoiDto): string {
+  if (area.timeframe === "1w") {
+    return area.direction === "support" ? "#14b8a6" : "#f97316";
+  }
+  return area.direction === "support" ? "#a3e635" : "#facc15";
 }
 
 function selectVisibleBos(items: BreakOfStructureDto[], mode: BosMode): BreakOfStructureDto[] {

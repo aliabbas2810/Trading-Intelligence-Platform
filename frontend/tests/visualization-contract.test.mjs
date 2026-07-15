@@ -25,8 +25,50 @@ test("frontend fetches backend read endpoints", () => {
   assert.match(apiSource, /\/trend-state/);
   assert.match(apiSource, /\/multi-timeframe-alignment/);
   assert.match(apiSource, /\/data-readiness/);
+  assert.match(apiSource, /\/aois/);
+  assert.match(apiSource, /\/aoi-location/);
   assert.match(apiSource, /\/health/);
   assert.match(apiSource, /URLSearchParams/);
+});
+
+test("frontend fetches and renders backend AOI overlays", () => {
+  assert.match(apiSource, /fetchAois/);
+  assert.match(apiSource, /fetchAoiLocation/);
+  assert.match(typeSource, /AoiReadDto/);
+  assert.match(typeSource, /AoiGateDto/);
+  assert.match(appSource, /fetchAois\(symbol, aoiStateFilter\)/);
+  assert.match(appSource, /fetchAoiLocation\(symbol\)/);
+  assert.match(appSource, /AoiOverlay/);
+  assert.match(appSource, /WEEKLY AOI/);
+  assert.match(appSource, /DAILY AOI/);
+  assert.match(appSource, /W\+D CONFLUENCE/);
+});
+
+test("AOI controls and diagnostics are present", () => {
+  assert.match(appSource, /Toggle AOI visibility/);
+  assert.match(appSource, /Toggle Weekly AOI/);
+  assert.match(appSource, /Toggle Daily AOI/);
+  assert.match(appSource, /Toggle AOI overlap/);
+  assert.match(appSource, /AOI state filter/);
+  assert.match(appSource, /active only/);
+  assert.match(appSource, /active\+broken/);
+  assert.match(appSource, /AOIs:/);
+  assert.match(appSource, /AOI gate:/);
+});
+
+test("AOI replay visibility uses backend timestamps without local detection", () => {
+  assert.match(appSource, /filterAoisForReplayCursor/);
+  assert.match(appSource, /area\.first_touch_time_ms <= cursorTimeMs/);
+  assert.match(appSource, /area\.confirmation_time_ms === null/);
+  assert.match(appSource, /filterAoiOverlaps/);
+  assert.doesNotMatch(appSource, /detectAoi|calculateAoi|findAoi|AoiEngine|ActiveStructureLeg/);
+  assert.doesNotMatch(appSource, /touch_count\s*[+*/-]|ranking\.score\s*[+*/-]/);
+});
+
+test("missing AOI readiness message renders", () => {
+  assert.match(appSource, /aoiMissingMessage/);
+  assert.match(appSource, /Weekly\/Daily AOI inputs are not ready/);
+  assert.match(appSource, /AOI readiness panel/);
 });
 
 test("frontend calls replay control endpoints", () => {

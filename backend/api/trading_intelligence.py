@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from backend.api.aoi import AoiGateResponse
 from backend.api.ai import AiDecisionResponse
 from backend.api.checklist import ChecklistResultResponse
 from backend.api.entry import EntryDecisionResponse
@@ -32,6 +33,7 @@ class TradingIntelligenceResponse(BaseModel):
     setup_score: SetupScoreResponse
     ai_decision: AiDecisionResponse
     readiness: AnalysisReadinessResponse | None = None
+    aoi_gate: AoiGateResponse | None = None
     metadata: dict[str, MetadataValue]
 
     @classmethod
@@ -49,5 +51,6 @@ class TradingIntelligenceResponse(BaseModel):
                 if result.readiness is not None
                 else None
             ),
+            aoi_gate=AoiGateResponse.from_gate(result.aoi_gate) if result.aoi_gate is not None else None,
             metadata=dict(result.metadata),
         )

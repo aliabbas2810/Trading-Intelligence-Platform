@@ -223,6 +223,8 @@ class ChecklistEngine:
             return ChecklistCategory.STRUCTURE_CONFIRMATION
         if evidence.category is DecisionEvidenceCategory.CANDLE:
             return ChecklistCategory.ENTRY_CONFIRMATION
+        if evidence.category is DecisionEvidenceCategory.AOI:
+            return ChecklistCategory.AOI_LOCATION
         if evidence.category is DecisionEvidenceCategory.INVALIDATION:
             return ChecklistCategory.INVALIDATION
         if evidence.category is DecisionEvidenceCategory.MISSING_CONFIRMATION:

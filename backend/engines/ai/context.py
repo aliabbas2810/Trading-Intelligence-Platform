@@ -73,6 +73,10 @@ class AiDecisionContextBuilder:
             facts.append(f"setup_score_percentage={decision_input.setup_score_percentage:.2f}")
         if decision_input.risk_reward_ratio is not None:
             facts.append(f"risk_reward_ratio={decision_input.risk_reward_ratio:.4f}")
+        if decision_input.aoi_gate_eligible is not None:
+            facts.append(f"aoi_gate_eligible={decision_input.aoi_gate_eligible}")
+        if decision_input.aoi_reason_codes:
+            facts.append(f"aoi_reason_codes={','.join(decision_input.aoi_reason_codes)}")
 
         if decision_input.risk_reward is not None:
             facts.append(f"risk_reward={decision_input.risk_reward}")

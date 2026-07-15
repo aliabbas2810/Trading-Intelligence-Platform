@@ -3,6 +3,18 @@ from __future__ import annotations
 from pathlib import Path
 
 from backend.api import StructureSnapshot
+from backend.engines.aoi import (
+    AoiBounds,
+    AoiDirection,
+    AoiGateResult,
+    AoiLocationResult,
+    AoiLocationState,
+    AoiOverlap,
+    AoiRankingMetadata,
+    AoiState,
+    AoiTimeframe,
+    AreaOfInterest,
+)
 from backend.engines.entry import (
     DecisionEvidenceCategory,
     DecisionEvidenceCode,
@@ -89,6 +101,8 @@ def test_long_setup_requires_15m_and_5m_bullish_structure() -> None:
     assert trace.trigger_timeframe is Timeframe.FIVE_MINUTE
     assert evidence_codes(trace) == (
         DecisionEvidenceCode.HIGHER_TIMEFRAMES_ALIGNED,
+        DecisionEvidenceCode.WEEKLY_AOI_ACTIVE,
+        DecisionEvidenceCode.AOI_LOCATION_INSIDE,
         DecisionEvidenceCode.FIFTEEN_MINUTE_STRUCTURE_CONFIRMATION,
         DecisionEvidenceCode.FIVE_MINUTE_STRUCTURE_CONFIRMATION,
         DecisionEvidenceCode.MISSING_CONFIRMATION,
@@ -173,6 +187,64 @@ def test_missing_data_handled_gracefully() -> None:
     assert all(item.metadata for item in trace.evidence if item.code is DecisionEvidenceCode.MISSING_CONFIRMATION)
 
 
+def test_aoi_gate_ineligible_returns_wait_before_entry_ready() -> None:
+    """Covers AOI-GATE-001 through AOI-GATE-003 and TEST-001."""
+
+    trace = EntrySignalEngine().evaluate(
+        base_input(
+            alignment=alignment(DirectionalBias.BULLISH, score=3),
+            trends=trend_set(TrendState.BULLISH),
+            structure_15m=bullish_structure(Timeframe.FIFTEEN_MINUTE),
+            structure_5m=bullish_structure(Timeframe.FIVE_MINUTE),
+            structure_1m=bullish_structure(Timeframe.ONE_MINUTE),
+            latest_candle=bullish_candle(),
+            aoi_gate=ineligible_aoi_gate(),
+        ),
+    )
+
+    assert trace.state is EntryState.WAIT
+    assert trace.direction is EntryDirection.NONE
+    assert DecisionEvidenceCode.AOI_LOCATION_NOT_ELIGIBLE in evidence_codes(trace)
+
+
+def test_moved_away_aoi_gate_blocks_entry_ready() -> None:
+    """Covers AOI-GATE-004 and TEST-001."""
+
+    trace = EntrySignalEngine().evaluate(
+        base_input(
+            alignment=alignment(DirectionalBias.BULLISH, score=3),
+            trends=trend_set(TrendState.BULLISH),
+            structure_15m=bullish_structure(Timeframe.FIFTEEN_MINUTE),
+            structure_5m=bullish_structure(Timeframe.FIVE_MINUTE),
+            structure_1m=bullish_structure(Timeframe.ONE_MINUTE),
+            latest_candle=bullish_candle(),
+            aoi_gate=ineligible_aoi_gate(location_state=AoiLocationState.MOVED_AWAY),
+        ),
+    )
+
+    assert trace.state is EntryState.WAIT
+    assert DecisionEvidenceCode.AOI_MOVED_AWAY in evidence_codes(trace)
+
+
+def test_weekly_daily_overlap_produces_confluence_evidence() -> None:
+    """Covers AOI-GATE-005 and TEST-001."""
+
+    trace = EntrySignalEngine().evaluate(
+        base_input(
+            alignment=alignment(DirectionalBias.BULLISH, score=3),
+            trends=trend_set(TrendState.BULLISH),
+            structure_15m=bullish_structure(Timeframe.FIFTEEN_MINUTE),
+            structure_5m=bullish_structure(Timeframe.FIVE_MINUTE),
+            structure_1m=bullish_structure(Timeframe.ONE_MINUTE),
+            latest_candle=bullish_candle(),
+            aoi_gate=eligible_aoi_gate(include_daily=True, include_overlap=True),
+        ),
+    )
+
+    assert trace.state is EntryState.ENTRY_READY
+    assert DecisionEvidenceCode.WEEKLY_DAILY_AOI_OVERLAP in evidence_codes(trace)
+
+
 def test_entry_engine_does_not_recalculate_structure_trend_scanner_or_ai_logic() -> None:
     """Covers ENTRY-006 no-recalculation constraint."""
 
@@ -206,6 +278,7 @@ def base_input(
     structure_1m: StructureSnapshot | None = None,
     bos_events: tuple[BreakOfStructure, ...] = (),
     latest_candle: Candle | None = None,
+    aoi_gate: AoiGateResult | None = None,
 ) -> EntrySignalInput:
     trends = trends or {}
     return EntrySignalInput(
@@ -222,6 +295,101 @@ def base_input(
         bos_events=bos_events,
         latest_candle=latest_candle,
         alignment=alignment,
+        aoi_gate=aoi_gate if aoi_gate is not None else eligible_aoi_gate(),
+    )
+
+
+def eligible_aoi_gate(
+    *,
+    include_daily: bool = False,
+    include_overlap: bool = False,
+) -> AoiGateResult:
+    weekly = area("weekly-aoi", AoiTimeframe.WEEKLY)
+    daily = area("daily-aoi", AoiTimeframe.DAILY) if include_daily else None
+    active = (weekly, daily) if daily is not None else (weekly,)
+    overlaps = (
+        AoiOverlap(
+            weekly_aoi_id=weekly.aoi_id,
+            daily_aoi_id=daily.aoi_id if daily is not None else "daily-aoi",
+            intersection_bounds=AoiBounds(99.0, 101.0),
+            overlap_ratio=0.5,
+            is_full_intersection=False,
+            confluence_weight=1.0,
+        ),
+    ) if include_overlap else ()
+    return AoiGateResult(
+        symbol="BTCUSDT",
+        eligible=True,
+        active_aois=active,
+        locations=tuple(
+            AoiLocationResult(
+                aoi_id=item.aoi_id,
+                state=AoiLocationState.INSIDE,
+                distance=0.0,
+                current_touch=True,
+                gate_open=True,
+                reason="price_inside_aoi",
+            )
+            for item in active
+        ),
+        overlaps=overlaps,
+        reason_codes=("weekly_aoi_active", "aoi_location_inside"),
+    )
+
+
+def ineligible_aoi_gate(
+    *,
+    location_state: AoiLocationState = AoiLocationState.OUTSIDE,
+) -> AoiGateResult:
+    weekly = area("weekly-aoi", AoiTimeframe.WEEKLY)
+    return AoiGateResult(
+        symbol="BTCUSDT",
+        eligible=False,
+        active_aois=(weekly,),
+        locations=(
+            AoiLocationResult(
+                aoi_id=weekly.aoi_id,
+                state=location_state,
+                distance=25.0,
+                current_touch=False,
+                gate_open=False,
+                reason=f"price_{location_state.value}_aoi",
+            ),
+        ),
+        reason_codes=(
+            "weekly_aoi_active",
+            "aoi_moved_away" if location_state is AoiLocationState.MOVED_AWAY else location_state.value,
+            "aoi_location_not_eligible",
+        ),
+    )
+
+
+def area(aoi_id: str, timeframe: AoiTimeframe) -> AreaOfInterest:
+    return AreaOfInterest(
+        aoi_id=aoi_id,
+        symbol="BTCUSDT",
+        timeframe=timeframe,
+        direction=AoiDirection.SUPPORT,
+        bounds=AoiBounds(99.0, 101.0),
+        state=AoiState.ACTIVE,
+        origin_structure_leg_id="leg",
+        origin_trend_id="trend",
+        origin_timeframe=timeframe,
+        contributing_candle_timestamps=(0, 60_000, 120_000),
+        first_touch_time_ms=0,
+        confirmation_time_ms=120_000,
+        touch_count=3,
+        close_count=1,
+        reaction_count=1,
+        ranking=AoiRankingMetadata(
+            score=10.0,
+            body_close_count=1,
+            body_touch_count=3,
+            reaction_count=1,
+            recency_time_ms=120_000,
+            normalized_width=0.01,
+        ),
+        state_changed_time_ms=120_000,
     )
 
 

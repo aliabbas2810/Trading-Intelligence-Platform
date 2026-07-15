@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from backend.api import StructureSnapshot
+from backend.engines.aoi import AoiLocationState
 from backend.engines.entry.models import (
     DecisionEvidence,
     DecisionEvidenceCategory,
@@ -43,6 +44,20 @@ class EntrySignalEngine:
                 metadata=self._metadata(signal_input),
             )
 
+        aoi_blocking = self._aoi_gate_blocking_evidence(signal_input)
+        if aoi_blocking:
+            return DecisionTrace(
+                state=EntryState.WAIT,
+                direction=EntryDirection.NONE,
+                confidence=0.1,
+                evidence=(
+                    self._alignment_support_evidence(signal_input),
+                    *aoi_blocking,
+                ),
+                metadata=self._metadata(signal_input),
+            )
+
+        aoi_support = self._aoi_support_evidence(signal_input)
         conflicting = self._conflicting_trend_evidence(signal_input, direction)
         if conflicting:
             return DecisionTrace(
@@ -51,6 +66,7 @@ class EntrySignalEngine:
                 confidence=0.2,
                 evidence=(
                     self._alignment_support_evidence(signal_input),
+                    *aoi_support,
                     *conflicting,
                 ),
                 metadata=self._metadata(signal_input),
@@ -64,6 +80,7 @@ class EntrySignalEngine:
                 confidence=0.0,
                 evidence=(
                     self._alignment_support_evidence(signal_input),
+                    *aoi_support,
                     *invalidations,
                 ),
                 trigger_timeframe=self._latest_bos_timeframe(signal_input),
@@ -78,6 +95,7 @@ class EntrySignalEngine:
                 confidence=0.35,
                 evidence=(
                     self._alignment_support_evidence(signal_input),
+                    *aoi_support,
                     self._status_evidence(
                         DecisionEvidenceCode.WAITING_FOR_LOWER_TIMEFRAME_DATA,
                         DecisionEvidenceCategory.MISSING_CONFIRMATION,
@@ -98,6 +116,7 @@ class EntrySignalEngine:
                 confidence=0.45,
                 evidence=(
                     self._alignment_support_evidence(signal_input),
+                    *aoi_support,
                     self._status_evidence(
                         DecisionEvidenceCode.WAITING_FOR_15M_5M_STRUCTURE,
                         DecisionEvidenceCategory.STRUCTURE,
@@ -121,6 +140,7 @@ class EntrySignalEngine:
                 confidence=0.85,
                 evidence=(
                     self._alignment_support_evidence(signal_input),
+                    *aoi_support,
                     *self._structure_confirmation_evidence(setup_timeframes, direction),
                     self._status_evidence(
                         DecisionEvidenceCode.SETUP_CONFIRMED,
@@ -142,6 +162,7 @@ class EntrySignalEngine:
             confidence=0.65,
             evidence=(
                 self._alignment_support_evidence(signal_input),
+                *aoi_support,
                 *self._structure_confirmation_evidence(setup_timeframes, direction),
                 self._status_evidence(
                     DecisionEvidenceCode.MISSING_CONFIRMATION,
@@ -318,7 +339,124 @@ class EntrySignalEngine:
             "latest_body_low": (
                 signal_input.latest_candle.body_low if signal_input.latest_candle is not None else None
             ),
+            "aoi_gate_eligible": (
+                signal_input.aoi_gate.eligible if signal_input.aoi_gate is not None else None
+            ),
+            "aoi_reason_codes": (
+                ",".join(signal_input.aoi_gate.reason_codes) if signal_input.aoi_gate is not None else None
+            ),
         }
+
+    def _aoi_gate_blocking_evidence(
+        self,
+        signal_input: EntrySignalInput,
+    ) -> tuple[DecisionEvidence, ...]:
+        gate = signal_input.aoi_gate
+        if gate is None:
+            return (
+                self._status_evidence(
+                    DecisionEvidenceCode.AOI_DATA_MISSING,
+                    DecisionEvidenceCategory.AOI,
+                    DecisionEvidencePolarity.MISSING,
+                    DecisionEvidenceSeverity.BLOCKING,
+                    "aoi_data_missing",
+                    metadata={"missing_key": "weekly_daily_aoi_location"},
+                ),
+            )
+        if gate.eligible:
+            return ()
+        codes = set(gate.reason_codes)
+        evidence: list[DecisionEvidence] = []
+        if "aoi_moved_away" in codes:
+            evidence.append(
+                self._status_evidence(
+                    DecisionEvidenceCode.AOI_MOVED_AWAY,
+                    DecisionEvidenceCategory.AOI,
+                    DecisionEvidencePolarity.OPPOSES,
+                    DecisionEvidenceSeverity.BLOCKING,
+                    "aoi_moved_away",
+                    metadata={"condition": "price_moved_away_from_weekly_daily_aoi"},
+                ),
+            )
+        evidence.append(
+            self._status_evidence(
+                DecisionEvidenceCode.AOI_LOCATION_NOT_ELIGIBLE,
+                DecisionEvidenceCategory.AOI,
+                DecisionEvidencePolarity.OPPOSES,
+                DecisionEvidenceSeverity.BLOCKING,
+                "aoi_location_not_eligible",
+                metadata={
+                    "condition": "price_not_inside_touching_reacting_or_entry_window",
+                    "reason_codes": ",".join(gate.reason_codes),
+                },
+            ),
+        )
+        return tuple(evidence)
+
+    def _aoi_support_evidence(self, signal_input: EntrySignalInput) -> tuple[DecisionEvidence, ...]:
+        gate = signal_input.aoi_gate
+        if gate is None or not gate.eligible:
+            return ()
+
+        evidence: list[DecisionEvidence] = []
+        if gate.weekly_active:
+            evidence.append(
+                self._status_evidence(
+                    DecisionEvidenceCode.WEEKLY_AOI_ACTIVE,
+                    DecisionEvidenceCategory.AOI,
+                    DecisionEvidencePolarity.SUPPORTS,
+                    DecisionEvidenceSeverity.INFO,
+                    "weekly_aoi_active",
+                    timeframe=Timeframe.WEEKLY,
+                ),
+            )
+        if gate.daily_active:
+            evidence.append(
+                self._status_evidence(
+                    DecisionEvidenceCode.DAILY_AOI_ACTIVE,
+                    DecisionEvidenceCategory.AOI,
+                    DecisionEvidencePolarity.SUPPORTS,
+                    DecisionEvidenceSeverity.INFO,
+                    "daily_aoi_active",
+                    timeframe=Timeframe.DAILY,
+                ),
+            )
+        if gate.overlaps:
+            evidence.append(
+                self._status_evidence(
+                    DecisionEvidenceCode.WEEKLY_DAILY_AOI_OVERLAP,
+                    DecisionEvidenceCategory.AOI,
+                    DecisionEvidencePolarity.SUPPORTS,
+                    DecisionEvidenceSeverity.INFO,
+                    "weekly_daily_aoi_overlap",
+                    metadata={"overlap_count": len(gate.overlaps)},
+                ),
+            )
+        for location in gate.locations:
+            if not location.gate_open:
+                continue
+            code = {
+                AoiLocationState.INSIDE: DecisionEvidenceCode.AOI_LOCATION_INSIDE,
+                AoiLocationState.REACTING: DecisionEvidenceCode.AOI_LOCATION_REACTING,
+                AoiLocationState.ENTRY_WINDOW: DecisionEvidenceCode.AOI_LOCATION_ENTRY_WINDOW,
+            }.get(location.state, DecisionEvidenceCode.AOI_LOCATION_INSIDE)
+            area = next((item for item in gate.active_aois if item.aoi_id == location.aoi_id), None)
+            evidence.append(
+                self._status_evidence(
+                    code,
+                    DecisionEvidenceCategory.AOI,
+                    DecisionEvidencePolarity.SUPPORTS,
+                    DecisionEvidenceSeverity.INFO,
+                    code.value,
+                    timeframe=area.timeframe.to_timeframe() if area is not None else None,
+                    metadata={
+                        "aoi_id": location.aoi_id,
+                        "location_state": location.state.value,
+                        "distance": location.distance,
+                    },
+                ),
+            )
+        return tuple(evidence)
 
     def _alignment_support_evidence(self, signal_input: EntrySignalInput) -> DecisionEvidence:
         return self._alignment_evidence(

@@ -21,10 +21,14 @@ from backend.engines.aoi import (
     ActiveStructureLeg,
     AoiEngine,
     AoiEvaluation,
+    AoiGateResult,
     AoiLocationConfig,
     AoiLocationResult,
+    AoiLocationState,
     AoiOverlap,
+    AoiRankingMetadata,
     AoiSizingConfig,
+    AoiSizingMode,
     AoiState,
     AoiTimeframe,
     AreaOfInterest,
@@ -49,6 +53,7 @@ from backend.engines.structure import (
     StructureEvent,
     StructureLabel,
     StructureSwing,
+    SwingKind,
 )
 from backend.engines.trend import (
     DirectionalBias,
@@ -475,6 +480,16 @@ class BackendRuntime:
             setup_grade=setup_score.grade if setup_score is not None else None,
             setup_score_percentage=setup_score.percentage if setup_score is not None else None,
             risk_reward_ratio=risk_plan.risk_reward_ratio if risk_plan is not None else None,
+            aoi_gate_eligible=(
+                bool(entry_trace.metadata["aoi_gate_eligible"])
+                if entry_trace is not None and isinstance(entry_trace.metadata.get("aoi_gate_eligible"), bool)
+                else None
+            ),
+            aoi_reason_codes=(
+                tuple(str(entry_trace.metadata["aoi_reason_codes"]).split(","))
+                if entry_trace is not None and entry_trace.metadata.get("aoi_reason_codes")
+                else ()
+            ),
         )
         return self.ai_decision_engine.generate_decision(decision_input)
 
@@ -572,6 +587,75 @@ class BackendRuntime:
             self.list_aois(symbol=symbol, timeframe=AoiTimeframe.DAILY),
             confluence_weight=confluence_weight,
         )
+
+    def evaluate_aoi_gate(
+        self,
+        *,
+        symbol: str,
+        config: AoiLocationConfig | None = None,
+        confluence_weight: float = 1.0,
+    ) -> AoiGateResult:
+        """Evaluate the Weekly/Daily AOI location hard gate from cached AOIs."""
+
+        location_config = config or self._default_aoi_location_config()
+        active_aois = tuple(
+            area
+            for area in self.list_aois(symbol=symbol)
+            if area.state is AoiState.ACTIVE and area.confirmation_time_ms is not None
+        )
+        locations: list[AoiLocationResult] = []
+        for area in active_aois:
+            candles = self.candle_store.list(symbol, area.timeframe.to_timeframe())
+            if not candles:
+                continue
+            locations.append(
+                self.aoi_engine.locate(
+                    area,
+                    candle=candles[-1],
+                    previous_candle=candles[-2] if len(candles) > 1 else None,
+                    config=location_config,
+                ),
+            )
+        overlaps = self.list_aoi_overlaps(symbol=symbol, confluence_weight=confluence_weight)
+        eligible = any(location.gate_open for location in locations)
+        reason_codes = self._aoi_gate_reason_codes(active_aois, tuple(locations), overlaps, eligible)
+        return AoiGateResult(
+            symbol=symbol,
+            eligible=eligible,
+            active_aois=active_aois,
+            locations=tuple(locations),
+            overlaps=overlaps,
+            reason_codes=reason_codes,
+        )
+
+    def _aoi_gate_reason_codes(
+        self,
+        active_aois: tuple[AreaOfInterest, ...],
+        locations: tuple[AoiLocationResult, ...],
+        overlaps: tuple[AoiOverlap, ...],
+        eligible: bool,
+    ) -> tuple[str, ...]:
+        codes: list[str] = []
+        if not active_aois:
+            codes.append("aoi_data_missing")
+        if any(area.timeframe is AoiTimeframe.WEEKLY for area in active_aois):
+            codes.append("weekly_aoi_active")
+        if any(area.timeframe is AoiTimeframe.DAILY for area in active_aois):
+            codes.append("daily_aoi_active")
+        if overlaps:
+            codes.append("weekly_daily_aoi_overlap")
+        for location in locations:
+            if location.state is AoiLocationState.INSIDE:
+                codes.append("aoi_location_inside")
+            elif location.state is AoiLocationState.REACTING:
+                codes.append("aoi_location_reacting")
+            elif location.state is AoiLocationState.ENTRY_WINDOW:
+                codes.append("aoi_location_entry_window")
+            elif location.state is AoiLocationState.MOVED_AWAY:
+                codes.append("aoi_moved_away")
+        if not eligible and "aoi_data_missing" not in codes:
+            codes.append("aoi_location_not_eligible")
+        return tuple(dict.fromkeys(codes))
 
     def _merge_previous_aoi_lifecycle(
         self,
@@ -744,6 +828,7 @@ class BackendRuntime:
             setup_score=setup_score,
         )
         readiness = self.evaluate_data_readiness(symbol=symbol)
+        aoi_gate = self.evaluate_aoi_gate(symbol=symbol)
         return TradingIntelligenceResult(
             symbol=symbol,
             timeframe=timeframe,
@@ -753,6 +838,7 @@ class BackendRuntime:
             setup_score=setup_score,
             ai_decision=ai_decision,
             readiness=readiness,
+            aoi_gate=aoi_gate,
             metadata={
                 "execution_order": "entry,risk,checklist,score,ai",
                 "runtime_state": self.state.value,
@@ -760,6 +846,8 @@ class BackendRuntime:
                 "minimum_risk_reward": minimum_risk_reward,
                 "readiness_state": readiness.overall_state.value,
                 "readiness_reason": readiness.reason,
+                "aoi_gate_eligible": aoi_gate.eligible,
+                "aoi_reason_codes": ",".join(aoi_gate.reason_codes),
             },
         )
 
@@ -828,6 +916,7 @@ class BackendRuntime:
         self._historical_candle_count = len(candles)
         self._set_historical_live_boundary(candles)
         self._historical_loaded = True
+        self._seed_cached_aois_if_possible()
         self._logger.info("Loaded historical candles into runtime")
 
     def _historical_candles(self) -> tuple[Candle, ...]:
@@ -883,7 +972,111 @@ class BackendRuntime:
             trend_store=self.trend_store,
             alignment_store=self.alignment_store,
         )
+        self._seed_cached_aois_if_possible()
         self._demo_seeded = True
+
+    def _seed_cached_aois_if_possible(self) -> None:
+        """Seed cached AOIs from existing stores for AOI-VIS-001 and AOI-GATE-001."""
+
+        sizing = self._default_aoi_sizing_config()
+        for timeframe in (AoiTimeframe.WEEKLY, AoiTimeframe.DAILY):
+            try:
+                self.evaluate_aois(
+                    symbol=self.active_symbol,
+                    timeframe=timeframe,
+                    sizing=sizing,
+                )
+            except ValueError:
+                self._logger.debug(
+                    "Demo AOI seed skipped for %s %s",
+                    self.active_symbol,
+                    timeframe.value,
+                )
+        if self.demo_data_enabled:
+            self._seed_synthetic_demo_aois_if_needed()
+
+    def _seed_synthetic_demo_aois_if_needed(self) -> None:
+        if self.list_aois(symbol=self.active_symbol):
+            return
+        for timeframe in (AoiTimeframe.WEEKLY, AoiTimeframe.DAILY):
+            candle = self._latest_candle(self.active_symbol, timeframe.to_timeframe())
+            if candle is None:
+                continue
+            half_width = max(1_000.0, candle.close * 0.04)
+            lower = max(1.0, candle.close - half_width)
+            upper = candle.close + half_width
+            start_swing = StructureSwing(
+                symbol=self.active_symbol,
+                timeframe=timeframe.to_timeframe(),
+                kind=SwingKind.LOW,
+                label=StructureLabel.HL,
+                level=lower,
+                candle_open_time_ms=candle.open_time_ms,
+                candle_close_time_ms=candle.close_time_ms,
+            )
+            end_swing = StructureSwing(
+                symbol=self.active_symbol,
+                timeframe=timeframe.to_timeframe(),
+                kind=SwingKind.HIGH,
+                label=StructureLabel.HH,
+                level=upper,
+                candle_open_time_ms=candle.open_time_ms,
+                candle_close_time_ms=candle.close_time_ms,
+            )
+            leg = ActiveStructureLeg(
+                symbol=self.active_symbol,
+                timeframe=timeframe,
+                trend_state=TrendState.BULLISH,
+                start_swing=start_swing,
+                end_swing=end_swing,
+                leg_id=f"{self.active_symbol}:{timeframe.value}:demo-aoi-leg",
+                trend_id=f"{self.active_symbol}:{timeframe.value}:demo-aoi-trend",
+            )
+            area = AreaOfInterest(
+                aoi_id=f"{self.active_symbol}:{timeframe.value}:demo-active-aoi",
+                symbol=self.active_symbol,
+                timeframe=timeframe,
+                direction=leg.direction,
+                bounds=leg.price_bounds,
+                state=AoiState.ACTIVE,
+                origin_structure_leg_id=leg.leg_id,
+                origin_trend_id=leg.trend_id,
+                origin_timeframe=timeframe,
+                contributing_candle_timestamps=(candle.open_time_ms,),
+                first_touch_time_ms=candle.open_time_ms,
+                confirmation_time_ms=candle.close_time_ms,
+                touch_count=3,
+                close_count=1,
+                reaction_count=1,
+                ranking=AoiRankingMetadata(
+                    score=10.0,
+                    body_close_count=1,
+                    body_touch_count=3,
+                    reaction_count=1,
+                    recency_time_ms=candle.close_time_ms,
+                    normalized_width=0.08,
+                ),
+                state_changed_time_ms=candle.close_time_ms,
+            )
+            self._aoi_evaluations[(self.active_symbol, timeframe)] = AoiEvaluation(
+                leg=leg,
+                areas=(area,),
+            )
+
+    def _default_aoi_sizing_config(self) -> AoiSizingConfig:
+        """Generic percentage AOI sizing placeholder; instrument calibration remains unresolved."""
+
+        return AoiSizingConfig(
+            mode=AoiSizingMode.PERCENTAGE,
+            minimum_percentage=0.0001,
+            maximum_percentage=0.25,
+        )
+
+    def _default_aoi_location_config(self) -> AoiLocationConfig:
+        return AoiLocationConfig(
+            proximity_tolerance=0.0,
+            maximum_post_reaction_excursion=0.0,
+        )
 
     def _handle_market_data_status(self, event: MarketDataStatusEvent) -> None:
         self._stream_status = event.status
@@ -1087,6 +1280,7 @@ class BackendRuntime:
             ),
             latest_candle=one_minute_candles[-1] if one_minute_candles else None,
             alignment=self.alignment_store.get(symbol),
+            aoi_gate=self.evaluate_aoi_gate(symbol=symbol),
         )
 
     def _latest_candle(self, symbol: str, timeframe: Timeframe) -> Candle | None:

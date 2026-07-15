@@ -9,6 +9,16 @@ from backend.api.service import create_app
 from backend.app import BackendRuntime, HistoricalRuntimeConfig, RuntimeMode, RuntimeState
 from backend.app.cli import main
 from backend.config import PlatformSettings, load_settings
+from backend.engines.aoi import (
+    ActiveStructureLeg,
+    AoiBounds,
+    AoiDirection,
+    AoiEvaluation,
+    AoiRankingMetadata,
+    AoiState,
+    AoiTimeframe,
+    AreaOfInterest,
+)
 from backend.engines.historical import HistoricalCandleFileStore, HistoricalCandleRequest
 from backend.engines.structure import (
     BreakDirection,
@@ -745,6 +755,7 @@ def test_checklist_evaluate_endpoint_returns_checklist_result() -> None:
     assert payload["fail_count"] == 0
     assert {item["category"] for item in payload["items"]} >= {
         "TREND_ALIGNMENT",
+        "AOI_LOCATION",
         "STRUCTURE_CONFIRMATION",
         "ENTRY_CONFIRMATION",
         "RISK_VALIDATION",
@@ -771,6 +782,7 @@ def test_setup_score_evaluate_endpoint_returns_score() -> None:
     assert payload["percentage"] >= 70.0
     assert {component["name"] for component in payload["components"]} == {
         "trend_alignment",
+        "aoi_location_gate",
         "entry_confirmation",
         "risk_validity",
         "checklist_health",
@@ -1011,6 +1023,78 @@ def seed_entry_ready_symbol(runtime: BackendRuntime, symbol: str) -> None:
             volume=1.0,
         ),
     )
+    seed_test_aois(runtime, symbol)
+
+
+def seed_test_aois(runtime: BackendRuntime, symbol: str) -> None:
+    for timeframe in (AoiTimeframe.WEEKLY, AoiTimeframe.DAILY):
+        domain_timeframe = timeframe.to_timeframe()
+        candle = Candle(
+            symbol=symbol,
+            timeframe=domain_timeframe,
+            open_time_ms=0,
+            close_time_ms=timeframe_duration_ms(domain_timeframe),
+            open=100.0,
+            high=110.0,
+            low=95.0,
+            close=105.0,
+            volume=1.0,
+        )
+        runtime.candle_store.save(candle)
+        start = StructureSwing(
+            symbol=symbol,
+            timeframe=domain_timeframe,
+            kind=SwingKind.LOW,
+            label=StructureLabel.HL,
+            level=95.0,
+            candle_open_time_ms=0,
+            candle_close_time_ms=60_000,
+        )
+        end = StructureSwing(
+            symbol=symbol,
+            timeframe=domain_timeframe,
+            kind=SwingKind.HIGH,
+            label=StructureLabel.HH,
+            level=115.0,
+            candle_open_time_ms=60_000,
+            candle_close_time_ms=120_000,
+        )
+        leg = ActiveStructureLeg(
+            symbol=symbol,
+            timeframe=timeframe,
+            trend_state=TrendState.BULLISH,
+            start_swing=start,
+            end_swing=end,
+            leg_id=f"{symbol}:{timeframe.value}:test-leg",
+            trend_id=f"{symbol}:{timeframe.value}:test-trend",
+        )
+        area = AreaOfInterest(
+            aoi_id=f"{symbol}:{timeframe.value}:test-aoi",
+            symbol=symbol,
+            timeframe=timeframe,
+            direction=AoiDirection.SUPPORT,
+            bounds=AoiBounds(95.0, 115.0),
+            state=AoiState.ACTIVE,
+            origin_structure_leg_id=leg.leg_id,
+            origin_trend_id=leg.trend_id,
+            origin_timeframe=timeframe,
+            contributing_candle_timestamps=(0, 60_000, 120_000),
+            first_touch_time_ms=0,
+            confirmation_time_ms=120_000,
+            touch_count=3,
+            close_count=1,
+            reaction_count=1,
+            ranking=AoiRankingMetadata(
+                score=10.0,
+                body_close_count=1,
+                body_touch_count=3,
+                reaction_count=1,
+                recency_time_ms=120_000,
+                normalized_width=0.1,
+            ),
+            state_changed_time_ms=120_000,
+        )
+        runtime._aoi_evaluations[(symbol, timeframe)] = AoiEvaluation(leg=leg, areas=(area,))
 
 
 def seed_required_candles(runtime: BackendRuntime, symbol: str) -> None:
@@ -1025,6 +1109,8 @@ def seed_required_candles(runtime: BackendRuntime, symbol: str) -> None:
         Timeframe.FIVE_MINUTE,
     ):
         duration_ms = timeframe_duration_ms(timeframe)
+        if any(candle.open_time_ms == 0 for candle in runtime.candle_store.list(symbol, timeframe)):
+            continue
         runtime.candle_store.save(
             Candle(
                 symbol=symbol,

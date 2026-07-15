@@ -5,6 +5,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 from backend.engines.ai import AiDecisionOutput
+from backend.engines.aoi import AoiGateResult
 from backend.engines.checklist import ChecklistResult
 from backend.engines.entry import DecisionTrace
 from backend.engines.entry.models import MetadataValue
@@ -26,6 +27,7 @@ class TradingIntelligenceResult:
     setup_score: SetupScore
     ai_decision: AiDecisionOutput
     readiness: AnalysisReadiness | None = None
+    aoi_gate: AoiGateResult | None = None
     metadata: Mapping[str, MetadataValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

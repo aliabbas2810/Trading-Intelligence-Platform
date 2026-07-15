@@ -213,7 +213,7 @@ npm test
 2. Confirm `/api/health` reports `running` and `dry_run`.
 3. Run `scripts/smoke_api.py`.
 4. Start the frontend dev server.
-5. Confirm the chart, structure overlays, BOS overlays, trend ribbon, replay controls, scanner panel, and trading intelligence panel render.
+5. Confirm the chart, structure overlays, BOS overlays, Weekly/Daily AOI boxes, W+D confluence, trend ribbon, replay controls, scanner panel, and trading intelligence panel render.
 6. Switch through all supported timeframes.
 7. Run scanner and confirm selecting a result updates the chart/intelligence context when demo data exists.
 8. Check browser developer tools and backend logs for errors.
@@ -223,7 +223,9 @@ npm test
 - Demo data is synthetic.
 - Historical and historical-live modes load local/downloaded candle data into the same read APIs as the frontend, but historical replay controls are not implemented yet.
 - Current correctness proves integration consistency, not real-market strategy validity.
-- Real HH/HL/LH/LL, BOS, trend, entry, and risk correctness still needs historical and live-market validation.
+- Real HH/HL/LH/LL, BOS, trend, AOI, entry, and risk correctness still needs historical and live-market validation.
+- AOI sizing, proximity tolerance, entry-window excursion, and ranking weights are not production calibrated.
+- Candidate AOIs are not tradable before the third qualifying body interaction; current demo AOIs are synthetic integration fixtures.
 - AI provider is currently deterministic/mock, not a real LLM.
 - No order execution.
 - No live trading.
@@ -233,7 +235,7 @@ npm test
 ## Roadmap / Next Focus
 
 - System correction and validation.
-- Historical and live-market validation of structure, trend, entry, and risk behavior.
+- Historical and live-market validation of structure, trend, AOI, entry, and risk behavior.
 - Frontend usability and visualization maturity.
 - Real LLM provider integration later, using structured deterministic outputs only.
 - Strategy and risk refinement later, without bypassing deterministic engine boundaries.

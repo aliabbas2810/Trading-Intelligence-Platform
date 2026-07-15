@@ -8,7 +8,14 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.ai import AiDecisionRequest, AiDecisionResponse
-from backend.api.aoi import AoiEvaluateRequest, AoiLocationRequest
+from backend.api.aoi import (
+    AoiEvaluateRequest,
+    AoiGateResponse,
+    AoiLocationRequest,
+    AoiOverlapResponse,
+    AoiReadResponse,
+    AoiResponse,
+)
 from backend.api.checklist import ChecklistEvaluateRequest, ChecklistResultResponse
 from backend.api.entry import EntryDecisionResponse, EntryEvaluateRequest
 from backend.api.replay import ReplayStartRequest, ReplayStatusResponse
@@ -123,11 +130,25 @@ def create_app(runtime: BackendRuntime | None = None) -> FastAPI:
         request: Request,
         symbol: str,
         timeframe: AoiTimeframe | None = None,
+        state_filter: str = "active",
     ) -> object:
-        """List cached AOIs without recomputing analysis."""
+        """List cached AOIs, overlaps, and location gate without recomputing AOIs."""
 
-        return jsonable_encoder(
-            runtime_from_request(request).list_aois(symbol=symbol, timeframe=timeframe)
+        runtime = runtime_from_request(request)
+        areas = runtime.list_aois(symbol=symbol, timeframe=timeframe)
+        if state_filter == "active":
+            areas = tuple(area for area in areas if area.state.value == "active")
+        elif state_filter == "active_broken":
+            areas = tuple(area for area in areas if area.state.value in {"active", "broken", "retest_pending"})
+        overlaps = runtime.list_aoi_overlaps(symbol=symbol, confluence_weight=1.0)
+        gate = runtime.evaluate_aoi_gate(symbol=symbol)
+        return AoiReadResponse(
+            symbol=symbol,
+            aois=tuple(AoiResponse.from_area(area) for area in areas),
+            overlaps=tuple(AoiOverlapResponse.from_overlap(item) for item in overlaps),
+            location_gate=AoiGateResponse.from_gate(gate),
+            location_gate_eligible=gate.eligible,
+            reason_codes=gate.reason_codes,
         )
 
     @app.get("/api/aoi-overlaps")
@@ -156,6 +177,12 @@ def create_app(runtime: BackendRuntime | None = None) -> FastAPI:
                 config=payload.to_location_config(),
             )
         )
+
+    @app.get("/api/aoi-location")
+    def aoi_location_read(request: Request, symbol: str) -> object:
+        """Read the symbol-level Weekly/Daily AOI location hard gate."""
+
+        return AoiGateResponse.from_gate(runtime_from_request(request).evaluate_aoi_gate(symbol=symbol))
 
     @app.post("/api/replay/start")
     def replay_start(request: Request, payload: ReplayStartRequest | None = None) -> object:

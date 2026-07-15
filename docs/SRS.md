@@ -920,6 +920,69 @@ The runtime/API may evaluate and read AOIs and location state, but routes shall 
 transport-only and existing entry, risk, scoring, structure, and trend semantics shall not
 change in this milestone.
 
+## 11B. AOI Visualization and Strategy Gate Requirements
+
+### AOI-VIS-001 - Render Weekly and Daily AOIs
+
+The frontend shall render backend-provided Weekly and Daily AOIs on all supported chart
+timeframes with distinct labels and styles. It shall not calculate AOIs locally.
+
+### AOI-VIS-002 - Render AOI Bounds and Confirmation Timing
+
+AOI visualization shall use backend lower/upper bounds, first-touch time, confirmation
+time, state, direction, ranking metadata, and active/current-leg metadata.
+
+### AOI-VIS-003 - Render Weekly/Daily Confluence
+
+The frontend shall preserve Weekly and Daily AOIs as separate objects and may render their
+backend-provided intersection as W+D confluence.
+
+### AOI-VIS-004 - Provide AOI Display Controls
+
+The frontend shall provide controls for AOI visibility, Weekly visibility, Daily visibility,
+overlap visibility, and active/broken/all state filtering.
+
+### AOI-VIS-005 - Replay-Safe AOI Display
+
+Replay visualization shall hide AOIs whose first-touch or confirmation timestamp is later
+than the replay cursor.
+
+### AOI-VIS-006 - AOI Readiness Diagnostics
+
+The UI shall show clear messaging when Weekly/Daily AOI inputs are not ready or no eligible
+AOIs are available.
+
+### AOI-GATE-001 - Weekly/Daily AOI Location Hard Gate
+
+The Entry Signal Engine shall require price to be inside, touching, reacting from, or within
+the configured entry window of an active Weekly or Daily AOI before returning ENTRY_READY.
+
+### AOI-GATE-002 - Gate Before Lower-Timeframe Entry Readiness
+
+If the Weekly/Daily AOI location gate is not eligible, entry evaluation shall return WAIT
+with direction NONE and typed AOI evidence before lower-timeframe entry readiness is allowed.
+
+### AOI-GATE-003 - Typed AOI Evidence
+
+Entry decisions shall expose typed AOI evidence for active Weekly AOI, active Daily AOI,
+Weekly/Daily overlap, inside/reacting/entry-window location, moved-away, not-eligible, and
+missing AOI data cases.
+
+### AOI-GATE-004 - Downstream AOI Consumption
+
+Checklist, setup scoring, trading intelligence, and mock AI decisions shall consume AOI gate
+evidence and shall not duplicate AOI discovery or market-structure logic.
+
+### AOI-GATE-005 - Scoring Hard-Gate Protection
+
+Setup scoring shall not return a trade-ready A/B setup when the AOI location gate is missing
+or ineligible.
+
+### AOI-GATE-006 - Scope Boundaries
+
+The AOI gate shall not change AOI discovery semantics, market structure detection, trend
+classification, risk rules, order execution, BitMart synchronization, or real LLM behavior.
+
 ---
 
 ## 12. Testing Requirements
@@ -959,6 +1022,7 @@ Candle continuity, duplicate prevention, and timestamp alignment shall be testab
 | M24 | SCORE-001 to SCORE-006 | Setup scoring engine |
 | M25 | INTEL-001 to INTEL-006 | Trading intelligence API consolidation |
 | M29 | AOI-001 to AOI-010 | Weekly/Daily AOI engine foundation |
+| M30 | AOI-VIS-001 to AOI-VIS-006, AOI-GATE-001 to AOI-GATE-006 | AOI visualization and strategy-gate integration |
 
 ---
 

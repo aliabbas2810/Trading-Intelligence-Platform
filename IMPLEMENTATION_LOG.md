@@ -207,3 +207,40 @@ Implemented scope:
 - `INTEL-006`: no order execution, real LLM integration, API keys, external services, or new trading rules.
 
 Verification: covered by backend pytest, ruff, and mypy.
+
+### M29 - Weekly/Daily AOI Engine Foundation
+
+Implemented deterministic Weekly/Daily AOI discovery over existing structure/trend outputs.
+
+Implemented scope:
+
+- `AOI-001`: active bullish HL-to-HH and bearish LH-to-LL structure-leg inputs.
+- `AOI-002`: Weekly and Daily AOI scope only.
+- `AOI-003`: historical candidate construction from candle-body interactions, not wick-only contacts.
+- `AOI-004`: third qualifying body interaction confirmation with first-touch and confirmation timestamps.
+- `AOI-005`: configurable fixed-tick, percentage, ATR-normalized, and hybrid sizing modes.
+- `AOI-006`: multiple AOIs and lifecycle states.
+- `AOI-007`: body-close break, wick-penetration tolerance, structural invalidation, and active-leg archival behavior.
+- `AOI-008`: Weekly/Daily overlap/confluence metadata without merging source AOIs.
+- `AOI-009`: location states from OUTSIDE through ENTRY_WINDOW/MOVED_AWAY.
+- `AOI-010`: runtime/API boundaries without recalculating structure or trend in routes.
+
+Verification: covered by backend pytest, ruff, and mypy.
+
+### M30 - AOI Visualization and Strategy-Gate Integration
+
+Implemented AOI as a strategy hard gate and rendered backend-provided AOIs in the frontend.
+
+Implemented scope:
+
+- `AOI-VIS-001` to `AOI-VIS-006`: frontend fetches AOI read endpoints, renders Weekly/Daily AOI bounds, W+D confluence, state controls, replay cursor filtering, and missing-AOI diagnostics without local AOI detection.
+- `AOI-GATE-001` to `AOI-GATE-006`: runtime computes symbol-level Weekly/Daily AOI location gate; Entry Signal Engine blocks ENTRY_READY when the gate is missing or ineligible; checklist, scoring, trading intelligence, and mock AI consume typed AOI evidence.
+
+Design notes:
+
+- AOI discovery semantics from M29 are unchanged.
+- Demo dry-run mode seeds deterministic active Weekly/Daily AOIs for integration visibility.
+- Setup scoring caps trade-ready grades when AOI gate evidence is missing or ineligible.
+- Calibration values for production AOI sizing, proximity, and entry-window behavior remain unresolved.
+
+Verification: backend and frontend test coverage added; full verification is required before commit.

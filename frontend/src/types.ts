@@ -6,6 +6,7 @@ export type DirectionalBias = "bullish" | "bearish" | "neutral";
 export type ScannerBiasFilter = DirectionalBias | "any";
 export type BosMode = "permanent" | "auto-clean";
 export type ReplaySourceType = "trades" | "candles";
+export type AoiStateFilter = "active" | "active_broken" | "all";
 
 export interface CandleDto {
   symbol: string;
@@ -221,5 +222,70 @@ export interface TradingIntelligenceDto {
     provider: string;
   };
   readiness: AnalysisReadinessDto | null;
+  aoi_gate: AoiGateDto | null;
   metadata: Record<string, string | number | boolean | null>;
+}
+
+export interface AoiDto {
+  aoi_id: string;
+  symbol: string;
+  timeframe: "1w" | "1d";
+  direction: "support" | "resistance";
+  state: string;
+  lower: number;
+  upper: number;
+  first_touch_time_ms: number;
+  confirmation_time_ms: number | null;
+  touch_count: number;
+  body_close_count: number;
+  reaction_count: number;
+  origin_structure_leg_id: string;
+  origin_trend_id: string;
+  ranking: {
+    score: number;
+    body_close_count: number;
+    body_touch_count: number;
+    reaction_count: number;
+    recency_time_ms: number;
+    normalized_width: number;
+  };
+  active_current_leg: boolean;
+  metadata: Record<string, string | number | boolean | null>;
+}
+
+export interface AoiOverlapDto {
+  weekly_aoi_id: string;
+  daily_aoi_id: string;
+  lower: number;
+  upper: number;
+  overlap_ratio: number;
+  is_full_intersection: boolean;
+  confluence_weight: number;
+}
+
+export interface AoiLocationDto {
+  aoi_id: string;
+  state: string;
+  distance: number;
+  current_touch: boolean;
+  gate_open: boolean;
+  reason: string;
+}
+
+export interface AoiGateDto {
+  symbol: string;
+  eligible: boolean;
+  active_aois: AoiDto[];
+  locations: AoiLocationDto[];
+  overlaps: AoiOverlapDto[];
+  reason_codes: string[];
+}
+
+export interface AoiReadDto {
+  symbol: string;
+  aois: AoiDto[];
+  overlaps: AoiOverlapDto[];
+  location_gate: AoiGateDto;
+  location_gate_eligible: boolean;
+  reason_codes: string[];
 }

@@ -1,5 +1,8 @@
 import type {
   CandleDto,
+  AoiReadDto,
+  AoiStateFilter,
+  AoiGateDto,
   AnalysisReadinessDto,
   HealthStatusDto,
   MultiTimeframeAlignmentDto,
@@ -59,6 +62,14 @@ export function fetchMultiTimeframeAlignment(symbol: string): Promise<MultiTimef
 
 export function fetchDataReadiness(symbol: string): Promise<AnalysisReadinessDto> {
   return getJson<AnalysisReadinessDto>(`/data-readiness?${query({ symbol })}`);
+}
+
+export function fetchAois(symbol: string, stateFilter: AoiStateFilter): Promise<AoiReadDto> {
+  return getJson<AoiReadDto>(`/aois?${query({ symbol, state_filter: stateFilter })}`);
+}
+
+export function fetchAoiLocation(symbol: string): Promise<AoiGateDto> {
+  return getJson<AoiGateDto>(`/aoi-location?${query({ symbol })}`);
 }
 
 export function fetchHealthStatus(): Promise<HealthStatusDto> {

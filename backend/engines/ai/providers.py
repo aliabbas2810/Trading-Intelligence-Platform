@@ -109,12 +109,21 @@ class RuleBasedMockAiDecisionProvider:
             risks.append("Checklist contains failed items.")
         if decision_input.entry_state is EntryState.WATCH:
             risks.append("Entry setup is still watch-only.")
+        if decision_input.aoi_gate_eligible is False:
+            risks.append("AOI location gate is not eligible.")
         if not risks:
             risks.append("No additional deterministic risk context was supplied.")
         return tuple(risks)
 
     def _risk_severity(self, risks: tuple[str, ...]) -> AiRiskSeverity:
-        if any(risk in {"Risk plan is invalid.", "Checklist contains failed items."} for risk in risks):
+        if any(
+            risk in {
+                "Risk plan is invalid.",
+                "Checklist contains failed items.",
+                "AOI location gate is not eligible.",
+            }
+            for risk in risks
+        ):
             return AiRiskSeverity.HIGH
         if len(risks) >= 3:
             return AiRiskSeverity.HIGH
@@ -180,6 +189,17 @@ class RuleBasedMockAiDecisionProvider:
                     evidence=f"{decision_input.setup_grade.value}/{decision_input.setup_score_percentage}",
                 ),
             )
+        if decision_input.aoi_gate_eligible is not None:
+            reasons.append(
+                AiReason(
+                    category="aoi",
+                    message="AOI location gate was supplied.",
+                    evidence=(
+                        f"eligible={decision_input.aoi_gate_eligible};"
+                        f"reasons={','.join(decision_input.aoi_reason_codes) or 'none'}"
+                    ),
+                ),
+            )
         if not reasons:
             reasons.append(
                 AiReason(
@@ -197,6 +217,7 @@ class RuleBasedMockAiDecisionProvider:
             and decision_input.risk_state is RiskAssessmentState.VALID
             and decision_input.checklist_status is ChecklistItemStatus.PASS
             and decision_input.setup_grade in {ScoreGrade.A, ScoreGrade.B}
+            and decision_input.aoi_gate_eligible is not False
         )
 
     def _has_invalid_intelligence(self, decision_input: AiDecisionInput) -> bool:
@@ -205,4 +226,5 @@ class RuleBasedMockAiDecisionProvider:
             or decision_input.risk_state is RiskAssessmentState.INVALID
             or decision_input.checklist_status is ChecklistItemStatus.FAIL
             or decision_input.setup_grade is ScoreGrade.F
+            or decision_input.aoi_gate_eligible is False
         )

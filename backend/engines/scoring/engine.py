@@ -3,6 +3,7 @@ from __future__ import annotations
 from backend.engines.checklist import ChecklistItemStatus
 from backend.engines.entry import (
     DecisionEvidenceCategory,
+    DecisionEvidenceCode,
     DecisionEvidencePolarity,
     EntryState,
 )
@@ -19,12 +20,21 @@ class SetupScoringEngine:
 
         components = (
             self._trend_component(scoring_input),
+            self._aoi_component(scoring_input),
             self._entry_component(scoring_input),
             self._risk_component(scoring_input),
             self._checklist_component(scoring_input),
         )
         total_score = round(sum(component.weighted_score for component in components), 4)
         max_score = round(sum(component.max_score for component in components), 4)
+        if self._aoi_gate_failed(scoring_input):
+            total_score = round(min(total_score, max_score * 0.54), 4)
+        if scoring_input.entry_trace is not None and scoring_input.entry_trace.state is EntryState.INVALIDATED:
+            total_score = round(min(total_score, max_score * 0.39), 4)
+        elif scoring_input.entry_trace is not None and scoring_input.entry_trace.missing_confirmations:
+            total_score = round(min(total_score, max_score * 0.54), 4)
+        if scoring_input.risk_plan is not None and scoring_input.risk_plan.state is RiskAssessmentState.INCOMPLETE:
+            total_score = round(min(total_score, max_score * 0.54), 4)
         percentage = round((total_score / max_score) * 100.0, 4)
         grade = grade_for_percentage(percentage)
         warnings = self._warnings(scoring_input, components)
@@ -56,6 +66,7 @@ class SetupScoringEngine:
                     scoring_input.scanner_candidate.score if scoring_input.scanner_candidate is not None else None
                 ),
                 **dict(scoring_input.metadata),
+                "aoi_gate_failed": self._aoi_gate_failed(scoring_input),
             },
         )
 
@@ -66,7 +77,7 @@ class SetupScoringEngine:
                 name="trend_alignment",
                 category="trend",
                 raw_score=0.0,
-                weight=0.25,
+                weight=0.2,
                 evidence_codes=(),
                 reasons=("alignment_missing",),
                 metadata={"alignment_score": None, "bias": None},
@@ -79,7 +90,7 @@ class SetupScoringEngine:
             name="trend_alignment",
             category="trend",
             raw_score=raw_score,
-            weight=0.25,
+            weight=0.2,
             evidence_codes=(),
             reasons=(alignment.reason,),
             metadata={
@@ -95,7 +106,7 @@ class SetupScoringEngine:
                 name="entry_confirmation",
                 category="entry",
                 raw_score=0.0,
-                weight=0.25,
+                weight=0.2,
                 evidence_codes=(),
                 reasons=("entry_trace_missing",),
             )
@@ -125,7 +136,7 @@ class SetupScoringEngine:
             name="entry_confirmation",
             category="entry",
             raw_score=raw_score,
-            weight=0.25,
+            weight=0.2,
             evidence_codes=tuple(item.code.value for item in trace.evidence),
             reasons=trace.reasons or tuple(item.description for item in trace.evidence),
             metadata={
@@ -143,7 +154,7 @@ class SetupScoringEngine:
                 name="risk_validity",
                 category="risk",
                 raw_score=0.0,
-                weight=0.25,
+                weight=0.2,
                 evidence_codes=(),
                 reasons=("risk_plan_missing",),
             )
@@ -161,7 +172,7 @@ class SetupScoringEngine:
             name="risk_validity",
             category="risk",
             raw_score=raw_score,
-            weight=0.25,
+            weight=0.2,
             evidence_codes=tuple(item.code.value for item in plan.evidence),
             reasons=plan.reasons,
             metadata={
@@ -179,7 +190,7 @@ class SetupScoringEngine:
                 name="checklist_health",
                 category="checklist",
                 raw_score=0.0,
-                weight=0.25,
+                weight=0.2,
                 evidence_codes=(),
                 reasons=("checklist_missing",),
             )
@@ -192,7 +203,7 @@ class SetupScoringEngine:
             name="checklist_health",
             category="checklist",
             raw_score=raw_score,
-            weight=0.25,
+            weight=0.2,
             evidence_codes=tuple(code for item in result.items for code in item.evidence_codes),
             reasons=(result.summary,),
             metadata={
@@ -204,6 +215,56 @@ class SetupScoringEngine:
             },
         )
 
+    def _aoi_component(self, scoring_input: ScoringInput) -> ScoreComponent:
+        trace = scoring_input.entry_trace
+        if trace is None:
+            return self._component(
+                name="aoi_location_gate",
+                category="aoi",
+                raw_score=0.0,
+                weight=0.2,
+                evidence_codes=(),
+                reasons=("aoi_entry_trace_missing",),
+            )
+        codes = {item.code for item in trace.evidence}
+        if self._aoi_gate_failed(scoring_input):
+            return self._component(
+                name="aoi_location_gate",
+                category="aoi",
+                raw_score=0.0,
+                weight=0.2,
+                evidence_codes=tuple(item.code.value for item in trace.evidence if item.category is DecisionEvidenceCategory.AOI),
+                reasons=tuple(item.description for item in trace.evidence if item.category is DecisionEvidenceCategory.AOI),
+                metadata={"eligible": False},
+            )
+        location_support = codes.intersection(
+            {
+                DecisionEvidenceCode.AOI_LOCATION_INSIDE,
+                DecisionEvidenceCode.AOI_LOCATION_REACTING,
+                DecisionEvidenceCode.AOI_LOCATION_ENTRY_WINDOW,
+            },
+        )
+        active_support = codes.intersection(
+            {
+                DecisionEvidenceCode.WEEKLY_AOI_ACTIVE,
+                DecisionEvidenceCode.DAILY_AOI_ACTIVE,
+            },
+        )
+        overlap_bonus = 0.1 if DecisionEvidenceCode.WEEKLY_DAILY_AOI_OVERLAP in codes else 0.0
+        raw_score = min(1.0, (0.45 if active_support else 0.0) + (0.45 if location_support else 0.0) + overlap_bonus)
+        return self._component(
+            name="aoi_location_gate",
+            category="aoi",
+            raw_score=raw_score,
+            weight=0.2,
+            evidence_codes=tuple(item.code.value for item in trace.evidence if item.category is DecisionEvidenceCategory.AOI),
+            reasons=tuple(item.description for item in trace.evidence if item.category is DecisionEvidenceCategory.AOI) or ("aoi_evidence_missing",),
+            metadata={
+                "eligible": raw_score > 0.0,
+                "overlap": DecisionEvidenceCode.WEEKLY_DAILY_AOI_OVERLAP in codes,
+            },
+        )
+
     def _warnings(self, scoring_input: ScoringInput, components: tuple[ScoreComponent, ...]) -> tuple[str, ...]:
         warnings: list[str] = []
         if scoring_input.entry_trace is None:
@@ -212,6 +273,8 @@ class SetupScoringEngine:
             warnings.append("entry_invalidated")
         elif scoring_input.entry_trace.missing_confirmations:
             warnings.append("entry_missing_confirmations")
+        if self._aoi_gate_failed(scoring_input):
+            warnings.append("aoi_location_gate_failed")
 
         if scoring_input.risk_plan is None:
             warnings.append("risk_plan_missing")
@@ -229,6 +292,21 @@ class SetupScoringEngine:
             if component.raw_score < 0.4:
                 warnings.append(f"{component.name}_weak")
         return tuple(dict.fromkeys(warnings))
+
+    def _aoi_gate_failed(self, scoring_input: ScoringInput) -> bool:
+        trace = scoring_input.entry_trace
+        if trace is None:
+            return True
+        codes = {item.code for item in trace.evidence}
+        return bool(
+            codes.intersection(
+                {
+                    DecisionEvidenceCode.AOI_LOCATION_NOT_ELIGIBLE,
+                    DecisionEvidenceCode.AOI_MOVED_AWAY,
+                    DecisionEvidenceCode.AOI_DATA_MISSING,
+                },
+            ),
+        )
 
     def _component(
         self,

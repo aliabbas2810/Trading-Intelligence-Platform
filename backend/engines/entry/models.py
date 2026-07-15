@@ -6,6 +6,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 from backend.api import StructureSnapshot
+from backend.engines.aoi import AoiGateResult
 from backend.engines.structure import BreakOfStructure
 from backend.engines.trend import MultiTimeframeTrendResult, TrendUpdate
 from backend.models import Candle, Timeframe
@@ -38,6 +39,15 @@ class DecisionEvidenceCode(str, Enum):
     ONE_MINUTE_ENTRY_CONFIRMATION = "one_minute_trigger"
     MISSING_CONFIRMATION = "missing_confirmation"
     OPPOSING_BOS_INVALIDATION = "opposing_bos_invalidation"
+    WEEKLY_AOI_ACTIVE = "weekly_aoi_active"
+    DAILY_AOI_ACTIVE = "daily_aoi_active"
+    WEEKLY_DAILY_AOI_OVERLAP = "weekly_daily_aoi_overlap"
+    AOI_LOCATION_INSIDE = "aoi_location_inside"
+    AOI_LOCATION_REACTING = "aoi_location_reacting"
+    AOI_LOCATION_ENTRY_WINDOW = "aoi_location_entry_window"
+    AOI_LOCATION_NOT_ELIGIBLE = "aoi_location_not_eligible"
+    AOI_MOVED_AWAY = "aoi_moved_away"
+    AOI_DATA_MISSING = "aoi_data_missing"
 
 
 class DecisionEvidenceCategory(str, Enum):
@@ -48,6 +58,7 @@ class DecisionEvidenceCategory(str, Enum):
     CANDLE = "candle"
     MISSING_CONFIRMATION = "missing_confirmation"
     INVALIDATION = "invalidation"
+    AOI = "aoi"
 
 
 class DecisionEvidenceSeverity(str, Enum):
@@ -142,6 +153,7 @@ class EntrySignalInput:
     bos_events: tuple[BreakOfStructure, ...] = ()
     latest_candle: Candle | None = None
     alignment: MultiTimeframeTrendResult | None = None
+    aoi_gate: AoiGateResult | None = None
 
     def __post_init__(self) -> None:
         if not self.symbol:

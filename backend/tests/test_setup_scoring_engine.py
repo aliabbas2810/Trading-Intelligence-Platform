@@ -37,6 +37,7 @@ def test_a_grade_setup_from_entry_ready_valid_risk_and_passing_checklist() -> No
     assert score.total_score <= score.max_score
     assert {component.name for component in score.components} == {
         "trend_alignment",
+        "aoi_location_gate",
         "entry_confirmation",
         "risk_validity",
         "checklist_health",
@@ -198,6 +199,7 @@ def entry_ready_trace() -> DecisionTrace:
                 DecisionEvidenceSeverity.INFO,
                 "higher_timeframes_aligned",
             ),
+            *aoi_support_evidence(),
             evidence(
                 DecisionEvidenceCode.FIFTEEN_MINUTE_STRUCTURE_CONFIRMATION,
                 DecisionEvidenceCategory.STRUCTURE,
@@ -240,6 +242,7 @@ def watch_trace() -> DecisionTrace:
                 DecisionEvidenceSeverity.INFO,
                 "higher_timeframes_aligned",
             ),
+            *aoi_support_evidence(),
             evidence(
                 DecisionEvidenceCode.MISSING_CONFIRMATION,
                 DecisionEvidenceCategory.MISSING_CONFIRMATION,
@@ -265,6 +268,7 @@ def invalidated_trace() -> DecisionTrace:
                 DecisionEvidenceSeverity.INFO,
                 "higher_timeframes_aligned",
             ),
+            *aoi_support_evidence(),
             evidence(
                 DecisionEvidenceCode.OPPOSING_BOS_INVALIDATION,
                 DecisionEvidenceCategory.INVALIDATION,
@@ -272,6 +276,27 @@ def invalidated_trace() -> DecisionTrace:
                 DecisionEvidenceSeverity.BLOCKING,
                 "lower_timeframe_invalidation",
             ),
+        ),
+    )
+
+
+def aoi_support_evidence() -> tuple[DecisionEvidence, ...]:
+    return (
+        evidence(
+            DecisionEvidenceCode.WEEKLY_AOI_ACTIVE,
+            DecisionEvidenceCategory.AOI,
+            DecisionEvidencePolarity.SUPPORTS,
+            DecisionEvidenceSeverity.INFO,
+            "weekly_aoi_active",
+            timeframe=Timeframe.WEEKLY,
+        ),
+        evidence(
+            DecisionEvidenceCode.AOI_LOCATION_INSIDE,
+            DecisionEvidenceCategory.AOI,
+            DecisionEvidencePolarity.SUPPORTS,
+            DecisionEvidenceSeverity.INFO,
+            "aoi_location_inside",
+            timeframe=Timeframe.WEEKLY,
         ),
     )
 

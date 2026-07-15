@@ -308,6 +308,34 @@ class AoiLocationResult:
 
 
 @dataclass(frozen=True, slots=True)
+class AoiGateResult:
+    """Symbol-level Weekly/Daily AOI location gate for AOI-GATE-001..006."""
+
+    symbol: str
+    eligible: bool
+    active_aois: tuple[AreaOfInterest, ...]
+    locations: tuple[AoiLocationResult, ...]
+    overlaps: tuple[AoiOverlap, ...] = ()
+    reason_codes: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.symbol:
+            raise ValueError("AoiGateResult symbol is required")
+
+    @property
+    def weekly_active(self) -> bool:
+        return any(area.timeframe is AoiTimeframe.WEEKLY for area in self.active_aois)
+
+    @property
+    def daily_active(self) -> bool:
+        return any(area.timeframe is AoiTimeframe.DAILY for area in self.active_aois)
+
+    @property
+    def location_states(self) -> tuple[AoiLocationState, ...]:
+        return tuple(location.state for location in self.locations)
+
+
+@dataclass(frozen=True, slots=True)
 class AoiEvaluation:
     leg: ActiveStructureLeg
     candidates: tuple[AoiCandidate, ...] = field(default_factory=tuple)

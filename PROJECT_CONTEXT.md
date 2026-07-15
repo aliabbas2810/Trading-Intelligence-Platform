@@ -6,7 +6,7 @@ Trading Intelligence Platform (TIP)
 
 ## Current Development Phase
 
-Phase 3 planning for Trading Intelligence.
+Phase 3 Trading Intelligence implementation and validation.
 
 ## What We Are Building
 
@@ -29,6 +29,8 @@ The platform starts with Binance Spot trade data and BTCUSDT, but the backend no
 | M9 | Completed | Backend scanner foundation that ranks existing multi-symbol analytical outputs. |
 | M10 | Completed | Backend AI decision engine foundation with structured input and deterministic mock provider. |
 | M11-M20 | Completed | Runtime/API/frontend stabilization through local runnable backend, live Binance mode wiring, API service, visualization data connection, demo data, replay controls, scanner API/UI, AI decision API, and non-destructive chart replay cursor. |
+| M21-M26 | Completed | Entry, risk, checklist, setup scoring, consolidated trading intelligence API, and Trading Intelligence Panel. |
+| M27-M30 | In progress | Historical validation/runtime modes, Weekly/Daily AOI foundation, AOI visualization, and AOI hard-gate integration. |
 
 ## Current Architecture
 
@@ -77,11 +79,13 @@ TIP is organized around pipelines and engines:
 
 The backend can normalize trades, build and persist candles, aggregate higher timeframes, detect body-based structure, classify trends, aggregate multi-timeframe trend state, expose local API endpoints, replay historical events through deterministic replay components, drive non-destructive chart replay with a cursor, scan existing outputs for ranked setup candidates, classify entry state, produce deterministic risk plans, produce evidence-driven checklists, produce weighted setup scores, return consolidated trading-intelligence chains, and produce structured mock AI decision outputs.
 
-The backend also has a Weekly/Daily AOI foundation. Precomputed bullish HL-to-HH or bearish
-LH-to-LL legs define the search range; at least three candle-body interactions confirm a zone.
-Wicks are excluded during historical construction but may count when live price interacts with
-an established zone. This milestone does not yet change Entry Engine semantics or render AOIs
-in the frontend.
+The backend also has a Weekly/Daily AOI foundation and strategy gate. Precomputed bullish
+HL-to-HH or bearish LH-to-LL legs define the search range; at least three candle-body
+interactions confirm a zone. Wicks are excluded during historical construction but may count
+when live price interacts with an established zone. Entry readiness now requires an eligible
+active Weekly or Daily AOI location before lower-timeframe confirmation can become trade-ready.
+The frontend renders backend-provided Weekly/Daily AOIs and W+D confluence without calculating
+zones locally.
 
 ## AOI Calibration Decisions Still Open
 
@@ -90,28 +94,20 @@ in the frontend.
 - Production candidate-ranking weights.
 - Historical AOI retention policy after an active-leg change.
 - Weekly/Daily overlap score weight.
+- Production AOI location gate tolerance and entry-window calibration.
 
-The frontend can render backend-provided candles, structure overlays, BOS overlays, trend background/ribbon state, replay cursor controls, scanner results, and timeframe/symbol controls. It does not calculate market structure, trend, scanner score, or entry logic.
+The frontend can render backend-provided candles, structure overlays, BOS overlays, trend background/ribbon state, Weekly/Daily AOIs, W+D confluence, replay cursor controls, scanner results, trading intelligence, and timeframe/symbol controls. It does not calculate market structure, trend, AOIs, scanner score, or entry logic.
 
 ## Next Recommended Phase
 
-Recommended next phase: Phase 3 Trading Intelligence.
+Recommended next phase: continue Phase 3 validation.
 
-Goal: add deterministic setup-state classification on top of the completed market data, candle, structure, trend, replay, scanner, visualization, and AI foundations.
+Near-term focus:
 
-Planned M21: Entry Signal Engine.
-
-M21 should consume existing deterministic outputs only:
-
-- 1W, 1D, 4H, 2H, 1H, and 30M trend states.
-- 15M, 5M, and 1M structure snapshots.
-- BOS events, latest candles/body levels, and multi-timeframe alignment.
-
-M21 should classify the market as `WAIT`, `WATCH`, `LONG_SETUP`, `SHORT_SETUP`, `ENTRY_READY`, or `INVALIDATED`.
-
-M21 shall not execute trades, calculate position size, place orders, or use AI to decide structure. AI remains a downstream explanation layer over structured facts.
-
-Short roadmap after M21: expose entry signal state through backend APIs, then add optional UI rendering for entry-state diagnostics without adding order execution.
+- Validate AOI sizing/location calibration on historical and live market data.
+- Add stronger historical acceptance tests for AOI gate behavior.
+- Improve frontend visualization maturity without moving strategy logic into the UI.
+- Keep real LLM providers and order execution out of scope until deterministic behavior is validated.
 
 ## LLM Role
 

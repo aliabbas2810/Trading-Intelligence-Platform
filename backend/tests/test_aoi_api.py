@@ -30,8 +30,9 @@ def test_runtime_api_evaluates_and_reads_cached_daily_aois() -> None:
     assert evaluated.status_code == 200
     assert len(evaluated.json()["areas"]) == 1
     assert listed.status_code == 200
-    assert listed.json()[0]["state"] == "active"
-    assert listed.json()[0]["confirmation_time_ms"] == 4_000
+    assert listed.json()["aois"][0]["state"] == "active"
+    assert listed.json()["aois"][0]["confirmation_time_ms"] == 4_000
+    assert listed.json()["location_gate_eligible"] is True
 
 
 def test_runtime_api_reports_weekly_daily_aoi_overlap() -> None:
@@ -81,6 +82,18 @@ def test_runtime_api_evaluates_live_aoi_location() -> None:
     assert location.status_code == 200
     assert location.json()["state"] in {"inside", "reacting"}
     assert location.json()["gate_open"] is True
+
+
+def test_runtime_api_reads_symbol_level_aoi_location_gate() -> None:
+    runtime = _runtime_with_bullish_leg(Timeframe.DAILY, body_low=100, body_high=101)
+
+    with TestClient(create_app(runtime)) as client:
+        client.post("/api/aois/evaluate", json=_evaluate_payload("1d"))
+        location = client.get("/api/aoi-location", params={"symbol": "BTCUSDT"})
+
+    assert location.status_code == 200
+    assert location.json()["eligible"] is True
+    assert location.json()["reason_codes"]
 
 
 def test_runtime_archives_cached_aoi_when_active_leg_changes() -> None:
