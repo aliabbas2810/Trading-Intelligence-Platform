@@ -7,6 +7,7 @@ from pathlib import Path
 
 from backend.app.runtime import BackendRuntime, HistoricalRuntimeConfig, RuntimeMode
 from backend.api.service import create_app
+from backend.config import PlatformSettings, load_settings
 from backend.engines.historical import HistoricalCandleRequest
 from backend.engines.historical.loader import parse_utc_timestamp_ms
 from backend.models import Timeframe
@@ -21,6 +22,11 @@ def main(argv: list[str] | None = None) -> int:
     mode_group.add_argument("--dry-run", action="store_true", help="start without live Binance streaming")
     mode_group.add_argument("--live-binance", action="store_true", help="start Binance live stream when config enables it")
     mode_group.add_argument("--historical", action="store_true", help="load local historical candle data")
+    mode_group.add_argument(
+        "--historical-live",
+        action="store_true",
+        help="load historical 1m candles, then continue with Binance live streaming",
+    )
     parser.add_argument("--api", action="store_true", help="run the local FastAPI service")
     parser.add_argument("--host", default="127.0.0.1", help="API host when --api is used")
     parser.add_argument("--port", type=int, default=8000, help="API port when --api is used")
@@ -39,11 +45,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     mode = runtime_mode_from_args(args)
-    if mode is RuntimeMode.HISTORICAL:
+    historical_modes = {RuntimeMode.HISTORICAL, RuntimeMode.HISTORICAL_LIVE}
+    if mode in historical_modes:
         print_historical_preflight(args)
     runtime = BackendRuntime(
+        settings=settings_from_args(args),
         mode=mode,
-        historical_config=historical_config_from_args(args) if mode is RuntimeMode.HISTORICAL else None,
+        historical_config=historical_config_from_args(args) if mode in historical_modes else None,
     )
     if args.api:
         import uvicorn
@@ -80,14 +88,34 @@ def main(argv: list[str] | None = None) -> int:
 def runtime_mode_from_args(args: argparse.Namespace) -> RuntimeMode:
     if args.live_binance:
         return RuntimeMode.LIVE_BINANCE
+    if args.historical_live:
+        return RuntimeMode.HISTORICAL_LIVE
     if args.historical:
         return RuntimeMode.HISTORICAL
     return RuntimeMode.DRY_RUN
 
 
+def settings_from_args(args: argparse.Namespace) -> PlatformSettings:
+    settings = load_settings()
+    if not (args.live_binance or args.historical_live):
+        return settings
+    return settings.model_copy(
+        update={
+            "market_data": settings.market_data.model_copy(
+                update={
+                    "symbols": (args.symbol.upper(),),
+                    "live_enabled": True,
+                },
+            ),
+        },
+    )
+
+
 def historical_config_from_args(args: argparse.Namespace) -> HistoricalRuntimeConfig:
     if args.start is None or args.end is None:
-        raise SystemExit("--historical requires --start and --end")
+        raise SystemExit("--historical/--historical-live requires --start and --end")
+    if args.historical_live and Timeframe(args.timeframe) is not Timeframe.ONE_MINUTE:
+        raise SystemExit("--historical-live requires --timeframe 1m")
     return HistoricalRuntimeConfig(
         request=HistoricalCandleRequest(
             symbol=args.symbol.upper(),

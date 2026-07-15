@@ -862,6 +862,66 @@ M11 shall not add new trading logic. It shall assemble and coordinate existing c
 
 ---
 
+## 11A. Weekly/Daily Area of Interest Requirements
+
+### AOI-001 - Active Structure Leg Input
+
+The AOI engine shall consume precomputed Weekly/Daily structure and trend outputs. Bullish
+search ranges are active HL-to-HH legs; bearish search ranges are active LH-to-LL legs. It
+shall not recalculate structure or trend.
+
+### AOI-002 - Timeframe Scope
+
+The platform shall create AOIs only for Weekly and Daily timeframes in this milestone.
+
+### AOI-003 - Historical Body Interactions
+
+An AOI candidate shall be formed from candle-body range overlaps inside the active structure
+leg. Wick-only historical contacts shall not count.
+
+### AOI-004 - Confirmation and Replay Safety
+
+A candidate shall require at least three qualifying body interactions to become confirmed.
+The first-touch and third-touch confirmation timestamps shall be stored separately, and the
+candidate shall not be tradable before confirmation.
+
+### AOI-005 - Configurable Sizing and Ranking
+
+AOI sizing shall support fixed-tick, percentage, ATR-normalized, and hybrid modes without a
+hardcoded crypto equivalent of the source strategy's forex pip range. Candidate ranking shall
+deterministically prefer body closes, body touches, reactions, narrower zones, and recency
+using configurable weights.
+
+### AOI-006 - Multiple AOIs and Lifecycle
+
+Multiple AOIs may coexist within one active structure leg. AOIs shall support candidate,
+confirmed, active, broken, retest-pending, structurally-invalidated, and archived states.
+
+### AOI-007 - Invalidation Rules
+
+Wick penetration shall not invalidate an AOI. One candle-body close beyond the far boundary
+shall mark it broken; no two-close rule shall be invented. Trend changes shall structurally
+invalidate old AOIs, while active-leg replacement shall archive them for historical context.
+
+### AOI-008 - Weekly/Daily Confluence
+
+The engine shall detect partial and full Weekly/Daily AOI intersections while preserving the
+source AOIs as separate objects and returning explicit confluence metadata.
+
+### AOI-009 - Location Gate
+
+The engine shall classify live AOI location as OUTSIDE, APPROACHING, INSIDE, REACTING,
+ENTRY_WINDOW, or MOVED_AWAY. Established-zone contact may use the full candle range, while
+proximity and post-reaction excursion remain configurable.
+
+### AOI-010 - Runtime and API Boundary
+
+The runtime/API may evaluate and read AOIs and location state, but routes shall remain
+transport-only and existing entry, risk, scoring, structure, and trend semantics shall not
+change in this milestone.
+
+---
+
 ## 12. Testing Requirements
 
 ### TEST-001 — Unit Tests
@@ -898,6 +958,7 @@ Candle continuity, duplicate prevention, and timestamp alignment shall be testab
 | M23 | CHECKLIST-001 to CHECKLIST-006 | Checklist engine |
 | M24 | SCORE-001 to SCORE-006 | Setup scoring engine |
 | M25 | INTEL-001 to INTEL-006 | Trading intelligence API consolidation |
+| M29 | AOI-001 to AOI-010 | Weekly/Daily AOI engine foundation |
 
 ---
 

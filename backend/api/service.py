@@ -8,6 +8,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.ai import AiDecisionRequest, AiDecisionResponse
+from backend.api.aoi import AoiEvaluateRequest, AoiLocationRequest
 from backend.api.checklist import ChecklistEvaluateRequest, ChecklistResultResponse
 from backend.api.entry import EntryDecisionResponse, EntryEvaluateRequest
 from backend.api.replay import ReplayStartRequest, ReplayStatusResponse
@@ -17,6 +18,7 @@ from backend.api.scanner import ScannerRunRequest, ScannerSummaryResponse
 from backend.api.scoring import SetupScoreEvaluateRequest, SetupScoreResponse
 from backend.api.trading_intelligence import TradingIntelligenceRequest, TradingIntelligenceResponse
 from backend.app.runtime import BackendRuntime, RuntimeState
+from backend.engines.aoi import AoiTimeframe
 from backend.models import Timeframe
 
 
@@ -102,6 +104,58 @@ def create_app(runtime: BackendRuntime | None = None) -> FastAPI:
 
         readiness = runtime_from_request(request).evaluate_data_readiness(symbol=symbol)
         return AnalysisReadinessResponse.from_readiness(readiness)
+
+    @app.post("/api/aois/evaluate")
+    def aoi_evaluate(request: Request, payload: AoiEvaluateRequest) -> object:
+        """Evaluate Weekly/Daily AOIs through the runtime orchestration boundary."""
+
+        result = runtime_from_request(request).evaluate_aois(
+            symbol=payload.symbol,
+            timeframe=payload.timeframe,
+            sizing=payload.to_sizing_config(),
+            tick_size=payload.tick_size,
+            atr=payload.atr,
+        )
+        return jsonable_encoder(result)
+
+    @app.get("/api/aois")
+    def aois(
+        request: Request,
+        symbol: str,
+        timeframe: AoiTimeframe | None = None,
+    ) -> object:
+        """List cached AOIs without recomputing analysis."""
+
+        return jsonable_encoder(
+            runtime_from_request(request).list_aois(symbol=symbol, timeframe=timeframe)
+        )
+
+    @app.get("/api/aoi-overlaps")
+    def aoi_overlaps(
+        request: Request,
+        symbol: str,
+        confluence_weight: float,
+    ) -> object:
+        """Return Weekly/Daily AOI intersections without merging their source zones."""
+
+        return jsonable_encoder(
+            runtime_from_request(request).list_aoi_overlaps(
+                symbol=symbol,
+                confluence_weight=confluence_weight,
+            )
+        )
+
+    @app.post("/api/aoi-location")
+    def aoi_location(request: Request, payload: AoiLocationRequest) -> object:
+        """Evaluate the deterministic live AOI location gate."""
+
+        return jsonable_encoder(
+            runtime_from_request(request).evaluate_aoi_location(
+                symbol=payload.symbol,
+                aoi_id=payload.aoi_id,
+                config=payload.to_location_config(),
+            )
+        )
 
     @app.post("/api/replay/start")
     def replay_start(request: Request, payload: ReplayStartRequest | None = None) -> object:

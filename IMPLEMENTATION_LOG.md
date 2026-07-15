@@ -8,6 +8,28 @@ Implemented backend package skeleton, Pydantic settings, structured logging, syn
 
 Verification: covered by backend pytest, ruff, and mypy.
 
+### M29 - Weekly/Daily AOI Engine Foundation
+
+Implemented a deterministic backend AOI domain and engine that consumes existing candle,
+structure, and trend outputs without recalculating HH/HL/LH/LL or trend.
+
+Implemented scope:
+
+- `AOI-001`/`AOI-002`: typed bullish HL-to-HH and bearish LH-to-LL active-leg inputs for
+  Weekly and Daily only.
+- `AOI-003`/`AOI-004`: body-overlap candidate discovery, wick exclusion, separate first-touch
+  and third-touch confirmation timestamps, and replay-safe tradability.
+- `AOI-005`: configurable fixed-tick, percentage, ATR-normalized, and hybrid sizing plus
+  deterministic configurable ranking.
+- `AOI-006`/`AOI-007`: multiple-zone support and explicit lifecycle/invalidation states.
+- `AOI-008`: non-destructive Weekly/Daily overlap detection and confluence metadata.
+- `AOI-009`: deterministic live location gate with wick-aware established-zone contact.
+- `AOI-010`: runtime evaluation/read methods and thin API endpoints; Entry Engine semantics
+  remain unchanged.
+
+Deferred calibration: crypto sizing values, proximity tolerance, reaction excursion, ranking
+weights, historical retention policy, and overlap score weight.
+
 ### M2 - Market Data Pipeline
 
 Implemented Binance Spot trade message parser/normalizer, trade validation, market data pipeline interface, stream-client skeleton, and event publication tests.

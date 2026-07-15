@@ -17,6 +17,18 @@ from backend.api import (
 from backend.config import PlatformSettings, load_settings
 from backend.core import EventBus, configure_logging, get_logger
 from backend.engines.ai import AiDecisionEngine, AiDecisionInput, AiDecisionOutput, RuleBasedMockAiDecisionProvider
+from backend.engines.aoi import (
+    ActiveStructureLeg,
+    AoiEngine,
+    AoiEvaluation,
+    AoiLocationConfig,
+    AoiLocationResult,
+    AoiOverlap,
+    AoiSizingConfig,
+    AoiState,
+    AoiTimeframe,
+    AreaOfInterest,
+)
 from backend.engines.checklist import ChecklistEngine, ChecklistInput, ChecklistResult
 from backend.engines.entry import DecisionTrace, EntrySignalEngine, EntrySignalInput
 from backend.engines.intelligence import TradingIntelligenceResult
@@ -31,7 +43,13 @@ from backend.engines.replay import HistoricalTradeReplaySource, ReplayController
 from backend.engines.risk import RiskEngine, RiskInput, RiskPlan
 from backend.engines.scanner import ScannerEngine, ScannerSummary, SetupCandidate, SymbolScanInput
 from backend.engines.scoring import ScoringInput, SetupScore, SetupScoringEngine
-from backend.engines.structure import BreakOfStructure, MarketStructureEngine, StructureEvent, StructureSwing
+from backend.engines.structure import (
+    BreakOfStructure,
+    MarketStructureEngine,
+    StructureEvent,
+    StructureLabel,
+    StructureSwing,
+)
 from backend.engines.trend import (
     DirectionalBias,
     MultiTimeframeTrendAggregatedEvent,
@@ -39,8 +57,9 @@ from backend.engines.trend import (
     TimeframeTrendSnapshot,
     TrendChangedEvent,
     TrendEngine,
+    TrendState,
 )
-from backend.models import Candle, Timeframe
+from backend.models import Candle, Timeframe, Trade
 from backend.pipelines.candle import CandleClosedEvent, OneMinuteCandlePipeline
 from backend.pipelines.market_data import (
     BinanceTradeStreamClient,
@@ -60,6 +79,7 @@ class RuntimeMode(str, Enum):
     DRY_RUN = "dry_run"
     LIVE_BINANCE = "live_binance"
     HISTORICAL = "historical"
+    HISTORICAL_LIVE = "historical_live"
 
 
 class RuntimeState(str, Enum):
@@ -147,6 +167,19 @@ class BinanceLiveStreamRunner:
 LiveStreamRunnerFactory = Callable[[BinanceTradeStreamClient], LiveStreamRunner]
 
 
+class BoundaryFilteringMarketDataPipeline(EventBusMarketDataPipeline):
+    """Drops live trades before the historical/live handoff for FR-101 and RUNTIME-002."""
+
+    def __init__(self, event_bus: EventBus, accept_trade: Callable[[Trade], bool]) -> None:
+        super().__init__(event_bus)
+        self._accept_trade = accept_trade
+
+    def publish_trade(self, trade: Trade) -> None:
+        if not self._accept_trade(trade):
+            return
+        super().publish_trade(trade)
+
+
 class BackendRuntime:
     """Application orchestrator that wires existing components for RUNTIME-001 to RUNTIME-005."""
 
@@ -166,7 +199,11 @@ class BackendRuntime:
         self.event_bus = EventBus()
         self.candle_store = InMemoryCandleStore()
         self.market_data_parser = BinanceTradeMessageParser()
-        self.market_data_pipeline = EventBusMarketDataPipeline(self.event_bus)
+        self._historical_live_min_trade_timestamp_ms: int | None = None
+        self.market_data_pipeline = BoundaryFilteringMarketDataPipeline(
+            self.event_bus,
+            self._accept_trade_for_runtime,
+        )
         self.binance_stream_client = self._build_binance_stream_client()
         self._live_stream_runner_factory = live_stream_runner_factory or BinanceLiveStreamRunner
         self._live_stream_runner: LiveStreamRunner | None = None
@@ -194,6 +231,8 @@ class BackendRuntime:
             self.structure_store,
             self.trend_store,
         )
+        self.aoi_engine = AoiEngine()
+        self._aoi_evaluations: dict[tuple[str, AoiTimeframe], AoiEvaluation] = {}
         self.replay_controller = ReplayController(
             self.event_bus,
             HistoricalTradeReplaySource(()),
@@ -263,6 +302,7 @@ class BackendRuntime:
             ComponentHealth("timeframe_pipeline", status, "higher timeframe pipeline subscribed"),
             ComponentHealth("structure_engine", status, "created lazily per symbol/timeframe"),
             ComponentHealth("trend_engine", status, "created lazily per symbol/timeframe"),
+            ComponentHealth("aoi_engine", status, "weekly/daily AOI foundation ready"),
             ComponentHealth("multi_timeframe_aggregator", status, "aggregates trend snapshots"),
             ComponentHealth("replay_engine", status, self._replay_component_message()),
             ComponentHealth("scanner", status, "scanner foundation ready"),
@@ -281,6 +321,11 @@ class BackendRuntime:
                 "historical_data",
                 self._historical_component_status(),
                 self._historical_component_message(),
+            ),
+            ComponentHealth(
+                "historical_candles_loaded",
+                ComponentStatus.READY,
+                str(self._historical_candle_count),
             ),
         ]
         return RuntimeHealth(
@@ -354,6 +399,8 @@ class BackendRuntime:
             self.structure_store,
             self.trend_store,
         )
+        self.aoi_engine = AoiEngine()
+        self._aoi_evaluations = {}
         self._structure_engines = {}
         self._trend_engines = {}
         self._trend_snapshots = {}
@@ -366,6 +413,7 @@ class BackendRuntime:
         self._demo_seeded = False
         self._historical_loaded = False
         self._historical_candle_count = 0
+        self._historical_live_min_trade_timestamp_ms = None
 
     def run_scanner(
         self,
@@ -445,6 +493,123 @@ class BackendRuntime:
                 alignment.missing_timeframes if alignment is not None else ()
             ),
             alignment_score=alignment.alignment_score if alignment is not None else None,
+        )
+
+    def evaluate_aois(
+        self,
+        *,
+        symbol: str,
+        timeframe: AoiTimeframe,
+        sizing: AoiSizingConfig,
+        tick_size: float | None = None,
+        atr: float | None = None,
+    ) -> AoiEvaluation:
+        """Evaluate AOIs from stored candles and precomputed structure/trend snapshots."""
+
+        leg = self._active_structure_leg(symbol, timeframe)
+        evaluation = self.aoi_engine.evaluate(
+            leg=leg,
+            candles=self.candle_store.list(symbol, timeframe.to_timeframe()),
+            sizing=sizing,
+            tick_size=tick_size,
+            atr=atr,
+        )
+        evaluation = self._merge_previous_aoi_lifecycle(symbol, timeframe, leg, evaluation)
+        self._aoi_evaluations[(symbol, timeframe)] = evaluation
+        return evaluation
+
+    def list_aois(
+        self,
+        *,
+        symbol: str,
+        timeframe: AoiTimeframe | None = None,
+    ) -> tuple[AreaOfInterest, ...]:
+        """Read cached AOIs without recalculating structure, trend, or AOI candidates."""
+
+        timeframes = (timeframe,) if timeframe is not None else tuple(AoiTimeframe)
+        return tuple(
+            area
+            for item in timeframes
+            for area in (
+                self._aoi_evaluations[(symbol, item)].areas
+                if (symbol, item) in self._aoi_evaluations
+                else ()
+            )
+        )
+
+    def evaluate_aoi_location(
+        self,
+        *,
+        symbol: str,
+        aoi_id: str,
+        config: AoiLocationConfig,
+    ) -> AoiLocationResult:
+        """Evaluate the location gate against a cached AOI and latest completed candle."""
+
+        area = next((item for item in self.list_aois(symbol=symbol) if item.aoi_id == aoi_id), None)
+        if area is None:
+            raise ValueError(f"Unknown AOI {aoi_id!r} for {symbol}")
+        candles = self.candle_store.list(symbol, area.timeframe.to_timeframe())
+        if not candles:
+            raise ValueError("AOI location evaluation requires a completed candle")
+        return self.aoi_engine.locate(
+            area,
+            candle=candles[-1],
+            previous_candle=candles[-2] if len(candles) > 1 else None,
+            config=config,
+        )
+
+    def list_aoi_overlaps(
+        self,
+        *,
+        symbol: str,
+        confluence_weight: float,
+    ) -> tuple[AoiOverlap, ...]:
+        """Return non-destructive Weekly/Daily AOI intersections."""
+
+        return self.aoi_engine.find_overlaps(
+            self.list_aois(symbol=symbol, timeframe=AoiTimeframe.WEEKLY),
+            self.list_aois(symbol=symbol, timeframe=AoiTimeframe.DAILY),
+            confluence_weight=confluence_weight,
+        )
+
+    def _merge_previous_aoi_lifecycle(
+        self,
+        symbol: str,
+        timeframe: AoiTimeframe,
+        leg: ActiveStructureLeg,
+        evaluation: AoiEvaluation,
+    ) -> AoiEvaluation:
+        previous = self._aoi_evaluations.get((symbol, timeframe))
+        if previous is None:
+            return evaluation
+
+        latest_candle = self._latest_candle(symbol, timeframe.to_timeframe())
+        if latest_candle is None:
+            return evaluation
+
+        transitioned: list[AreaOfInterest] = []
+        for area in previous.areas:
+            updated = self.aoi_engine.update_lifecycle(
+                area,
+                candle=latest_candle,
+                current_structure_leg_id=leg.leg_id,
+                current_trend_id=leg.trend_id,
+            )
+            if updated.state is not AoiState.ACTIVE or not any(
+                item.aoi_id == updated.aoi_id for item in evaluation.areas
+            ):
+                transitioned.append(updated)
+        if not transitioned:
+            return evaluation
+        transitioned_ids = {area.aoi_id for area in transitioned}
+        return AoiEvaluation(
+            leg=evaluation.leg,
+            candidates=evaluation.candidates,
+            areas=(
+                *transitioned,
+                *(area for area in evaluation.areas if area.aoi_id not in transitioned_ids),
+            ),
         )
 
     def evaluate_risk(
@@ -617,7 +782,10 @@ class BackendRuntime:
 
     @property
     def stream_enabled(self) -> bool:
-        return self.mode is RuntimeMode.LIVE_BINANCE and self.settings.market_data.live_enabled
+        return (
+            self.mode in {RuntimeMode.LIVE_BINANCE, RuntimeMode.HISTORICAL_LIVE}
+            and self.settings.market_data.live_enabled
+        )
 
     @property
     def demo_data_enabled(self) -> bool:
@@ -625,7 +793,10 @@ class BackendRuntime:
 
     @property
     def historical_data_enabled(self) -> bool:
-        return self.mode is RuntimeMode.HISTORICAL and self.historical_config is not None
+        return (
+            self.mode in {RuntimeMode.HISTORICAL, RuntimeMode.HISTORICAL_LIVE}
+            and self.historical_config is not None
+        )
 
     def _build_binance_stream_client(self) -> BinanceTradeStreamClient:
         return BinanceTradeStreamClient(
@@ -655,6 +826,7 @@ class BackendRuntime:
         for candle in candles:
             self._publish_historical_candle(candle)
         self._historical_candle_count = len(candles)
+        self._set_historical_live_boundary(candles)
         self._historical_loaded = True
         self._logger.info("Loaded historical candles into runtime")
 
@@ -681,6 +853,25 @@ class BackendRuntime:
             return
         self._ensure_candle_stored(candle)
         self.event_bus.publish(TimeframeCandleClosedEvent(candle=candle))
+
+    def _set_historical_live_boundary(self, candles: tuple[Candle, ...]) -> None:
+        """Set the earliest accepted live trade timestamp after historical preload."""
+
+        if self.mode is not RuntimeMode.HISTORICAL_LIVE:
+            return
+        one_minute_close_times = (
+            candle.close_time_ms for candle in candles if candle.timeframe is Timeframe.ONE_MINUTE
+        )
+        self._historical_live_min_trade_timestamp_ms = max(one_minute_close_times, default=None)
+
+    def _accept_trade_for_runtime(self, trade: Trade) -> bool:
+        """Keep historical/live continuity deterministic without changing candle rules."""
+
+        if self.mode is not RuntimeMode.HISTORICAL_LIVE:
+            return True
+        if self._historical_live_min_trade_timestamp_ms is None:
+            return True
+        return trade.timestamp_ms >= self._historical_live_min_trade_timestamp_ms
 
     def _seed_demo_data_if_enabled(self) -> None:
         if not self.demo_data_enabled or self._demo_seeded:
@@ -735,7 +926,7 @@ class BackendRuntime:
         return ComponentStatus.READY if self._historical_loaded else ComponentStatus.READY
 
     def _historical_component_message(self) -> str:
-        if self.mode is not RuntimeMode.HISTORICAL:
+        if self.mode not in {RuntimeMode.HISTORICAL, RuntimeMode.HISTORICAL_LIVE}:
             return "disabled outside historical mode"
         if self.historical_config is None:
             return "historical config missing"
@@ -814,6 +1005,49 @@ class BackendRuntime:
             snapshot
             for (snapshot_symbol, _), snapshot in self._trend_snapshots.items()
             if snapshot_symbol == symbol
+        )
+
+    def _active_structure_leg(
+        self,
+        symbol: str,
+        timeframe: AoiTimeframe,
+    ) -> ActiveStructureLeg:
+        domain_timeframe = timeframe.to_timeframe()
+        trend = self.trend_store.get(symbol, domain_timeframe).update
+        if trend is None:
+            raise ValueError(f"No precomputed trend is available for {symbol} {timeframe.value}")
+        labels = (
+            (StructureLabel.HL, StructureLabel.HH)
+            if trend.state is TrendState.BULLISH
+            else (StructureLabel.LH, StructureLabel.LL)
+        )
+        swings = self.structure_store.list(symbol, domain_timeframe).swings
+        end = next((item for item in reversed(swings) if item.label is labels[1]), None)
+        start = next(
+            (
+                item
+                for item in reversed(swings)
+                if item.label is labels[0]
+                and end is not None
+                and item.candle_close_time_ms <= end.candle_close_time_ms
+            ),
+            None,
+        )
+        if start is None or end is None:
+            raise ValueError(
+                f"No active {labels[0].value}->{labels[1].value} leg is available for "
+                f"{symbol} {timeframe.value}"
+            )
+        leg_id = f"{symbol}:{timeframe.value}:{start.candle_close_time_ms}:{end.candle_close_time_ms}"
+        trend_id = f"{symbol}:{timeframe.value}:{trend.state.value}:{trend.event_time_ms}"
+        return ActiveStructureLeg(
+            symbol=symbol,
+            timeframe=timeframe,
+            trend_state=trend.state,
+            start_swing=start,
+            end_swing=end,
+            leg_id=leg_id,
+            trend_id=trend_id,
         )
 
     def _scanner_input_for(self, symbol: str, timeframe: Timeframe) -> SymbolScanInput:

@@ -50,6 +50,7 @@ TIP is organized around pipelines and engines:
 - `backend/engines/scoring/`: deterministic weighted setup scoring from entry, risk, checklist, alignment, and optional scanner context.
 - `backend/engines/intelligence/`: consolidated trading-intelligence result model for ordered orchestration.
 - `backend/engines/ai/`: structured AI decision foundation with provider abstraction and mock provider.
+- `backend/engines/aoi/`: Weekly/Daily AOI discovery, lifecycle, overlap, and location-gate foundation.
 - `backend/api/`: read-only visualization API boundaries over existing stores/snapshots.
 - `frontend/`: React + Lightweight Charts visualization shell and contract tests.
 
@@ -75,6 +76,20 @@ TIP is organized around pipelines and engines:
 ## Current Capability Snapshot
 
 The backend can normalize trades, build and persist candles, aggregate higher timeframes, detect body-based structure, classify trends, aggregate multi-timeframe trend state, expose local API endpoints, replay historical events through deterministic replay components, drive non-destructive chart replay with a cursor, scan existing outputs for ranked setup candidates, classify entry state, produce deterministic risk plans, produce evidence-driven checklists, produce weighted setup scores, return consolidated trading-intelligence chains, and produce structured mock AI decision outputs.
+
+The backend also has a Weekly/Daily AOI foundation. Precomputed bullish HL-to-HH or bearish
+LH-to-LL legs define the search range; at least three candle-body interactions confirm a zone.
+Wicks are excluded during historical construction but may count when live price interacts with
+an established zone. This milestone does not yet change Entry Engine semantics or render AOIs
+in the frontend.
+
+## AOI Calibration Decisions Still Open
+
+- Instrument-specific crypto AOI minimum and maximum sizing values.
+- AOI proximity tolerance and maximum post-reaction excursion.
+- Production candidate-ranking weights.
+- Historical AOI retention policy after an active-leg change.
+- Weekly/Daily overlap score weight.
 
 The frontend can render backend-provided candles, structure overlays, BOS overlays, trend background/ribbon state, replay cursor controls, scanner results, and timeframe/symbol controls. It does not calculate market structure, trend, scanner score, or entry logic.
 

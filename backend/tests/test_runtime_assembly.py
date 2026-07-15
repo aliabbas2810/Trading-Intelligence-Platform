@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import backend.app.runtime as runtime_module
 from backend.app import (
     BackendRuntime,
     ComponentStatus,
@@ -17,7 +18,7 @@ from backend.app.cli import main
 from backend.config import PlatformSettings, load_settings
 from backend.engines.historical import HistoricalCandleFileStore, HistoricalCandleRequest
 from backend.models import Candle, Timeframe, Trade
-from backend.pipelines.market_data import BinanceTradeStreamClient
+from backend.pipelines.market_data import BinanceTradeStreamClient, TradeReceivedEvent
 
 
 def make_trade(timestamp_ms: int, price: float) -> Trade:
@@ -27,6 +28,18 @@ def make_trade(timestamp_ms: int, price: float) -> Trade:
         quantity=1.0,
         timestamp_ms=timestamp_ms,
         source="runtime-test",
+    )
+
+
+def trade_payload(*, timestamp_ms: int, price: float) -> str:
+    return json.dumps(
+        {
+            "e": "trade",
+            "s": "BTCUSDT",
+            "p": str(price),
+            "q": "1.0",
+            "T": timestamp_ms,
+        },
     )
 
 
@@ -120,6 +133,80 @@ def test_historical_runtime_mode_does_not_seed_demo_data(tmp_path: Path) -> None
     candles = runtime.visualization_api.get_candles("BTCUSDT", Timeframe.ONE_MINUTE)
     assert len(candles) == 4
     assert {candle.open_time_ms for candle in candles} == {0, 60_000, 120_000, 180_000}
+
+
+def test_historical_live_runtime_loads_fixture_and_starts_stream(tmp_path: Path) -> None:
+    """Covers M29 historical preload followed by injected live stream startup."""
+
+    request = historical_request()
+    HistoricalCandleFileStore(tmp_path).save(request, historical_fixture_candles(count=4))
+    runner = RecordingLiveStreamRunner()
+    runtime = BackendRuntime(
+        settings=live_enabled_settings(),
+        mode=RuntimeMode.HISTORICAL_LIVE,
+        historical_config=HistoricalRuntimeConfig(request=request, data_root=tmp_path),
+        live_stream_runner_factory=lambda client: runner.bind(client),
+    )
+
+    runtime.start()
+    components = {component.name: component for component in runtime.health().components}
+
+    assert runtime.health().mode is RuntimeMode.HISTORICAL_LIVE
+    assert runner.started
+    assert components["market_data_mode"].message == "historical_live"
+    assert components["stream_enabled"].message == "True"
+    assert components["binance_stream_client"].status is ComponentStatus.RUNNING
+    assert components["historical_data"].message == "loaded 4 1m candles for BTCUSDT"
+    assert components["historical_candles_loaded"].message == "4"
+    assert components["demo_data"].status is ComponentStatus.DISABLED
+    assert len(runtime.visualization_api.get_candles("BTCUSDT", Timeframe.ONE_MINUTE)) == 4
+
+
+def test_historical_live_boundary_drops_old_live_trades(tmp_path: Path) -> None:
+    """Historical/live continuity must not republish trades before the loaded 1m boundary."""
+
+    request = historical_request()
+    HistoricalCandleFileStore(tmp_path).save(request, historical_fixture_candles(count=2))
+    runner = RecordingLiveStreamRunner(
+        messages=(
+            trade_payload(timestamp_ms=119_000, price=200.0),
+            trade_payload(timestamp_ms=120_000, price=300.0),
+            trade_payload(timestamp_ms=180_000, price=301.0),
+        ),
+    )
+    runtime = BackendRuntime(
+        settings=live_enabled_settings(),
+        mode=RuntimeMode.HISTORICAL_LIVE,
+        historical_config=HistoricalRuntimeConfig(request=request, data_root=tmp_path),
+        live_stream_runner_factory=lambda client: runner.bind(client),
+    )
+    received_live_trades: list[Trade] = []
+    runtime.event_bus.subscribe(TradeReceivedEvent, lambda event: received_live_trades.append(event.trade))
+
+    runtime.start()
+
+    assert [trade.timestamp_ms for trade in received_live_trades] == [120_000, 180_000]
+    candles = runtime.visualization_api.get_candles("BTCUSDT", Timeframe.ONE_MINUTE)
+    assert len(candles) == 3
+    assert candles[-1].open_time_ms == 120_000
+    assert candles[-1].open == 300.0
+
+
+def test_historical_live_does_not_add_duplicate_event_subscriptions(tmp_path: Path) -> None:
+    """M29 keeps runtime wiring single-path and avoids duplicate trade subscribers."""
+
+    request = historical_request()
+    HistoricalCandleFileStore(tmp_path).save(request, historical_fixture_candles(count=2))
+    runtime = BackendRuntime(
+        settings=live_enabled_settings(),
+        mode=RuntimeMode.HISTORICAL_LIVE,
+        historical_config=HistoricalRuntimeConfig(request=request, data_root=tmp_path),
+        live_stream_runner_factory=lambda client: RecordingLiveStreamRunner().bind(client),
+    )
+
+    runtime.start()
+
+    assert len(runtime.event_bus._handlers[TradeReceivedEvent]) == 1  # noqa: SLF001
 
 
 def test_live_binance_mode_starts_stream_client() -> None:
@@ -272,6 +359,44 @@ def test_cli_entrypoint_starts_historical_once(
     assert "expected_1m_candles=4" in captured.out
     assert "range is shorter than 1d" in captured.out
     assert '"mode": "historical"' in captured.out
+    assert '"state": "running"' in captured.out
+
+
+def test_cli_entrypoint_starts_historical_live_once(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Covers M29 CLI mode selection for historical-live runtime."""
+
+    request = historical_request()
+    HistoricalCandleFileStore(tmp_path).save(request, historical_fixture_candles(count=4))
+    monkeypatch.setattr(
+        runtime_module,
+        "BinanceLiveStreamRunner",
+        lambda client: RecordingLiveStreamRunner().bind(client),
+    )
+
+    exit_code = main(
+        [
+            "--historical-live",
+            "--symbol",
+            "BTCUSDT",
+            "--timeframe",
+            "1m",
+            "--start",
+            "1970-01-01T00:00:00Z",
+            "--end",
+            "1970-01-01T00:04:00Z",
+            "--data-root",
+            str(tmp_path),
+            "--once",
+        ],
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert '"mode": "historical_live"' in captured.out
     assert '"state": "running"' in captured.out
 
 
