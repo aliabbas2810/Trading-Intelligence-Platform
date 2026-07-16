@@ -10,6 +10,7 @@ from backend.engines.checklist.models import (
 from backend.engines.entry import (
     DecisionEvidence,
     DecisionEvidenceCategory,
+    DecisionEvidenceCode,
     DecisionEvidencePolarity,
     DecisionEvidenceSeverity,
 )
@@ -31,6 +32,7 @@ class ChecklistEngine:
         items = (
             *self._alignment_items(checklist_input),
             *self._entry_items(checklist_input),
+            *self._aoi_items(checklist_input),
             *self._risk_items(checklist_input),
             *self._data_quality_items(checklist_input),
         )
@@ -138,6 +140,140 @@ class ChecklistEngine:
                 "entry_category": evidence.category.value,
                 **dict(evidence.metadata),
             },
+        )
+
+    def _aoi_items(self, checklist_input: ChecklistInput) -> tuple[ChecklistItem, ...]:
+        trace = checklist_input.entry_trace
+        if trace is None:
+            return (
+                self._aoi_item(
+                    item_id="aoi.location_gate",
+                    status=ChecklistItemStatus.MISSING,
+                    label="AOI location gate",
+                    description="entry_trace_missing",
+                    evidence_codes=(),
+                    severity="blocking",
+                ),
+            )
+
+        codes = {evidence.code for evidence in trace.evidence if evidence.category is DecisionEvidenceCategory.AOI}
+        missing = DecisionEvidenceCode.AOI_DATA_MISSING in codes
+        location_failed = bool(
+            codes.intersection(
+                {
+                    DecisionEvidenceCode.AOI_LOCATION_NOT_ELIGIBLE,
+                    DecisionEvidenceCode.AOI_MOVED_AWAY,
+                },
+            ),
+        )
+        location_passed = bool(
+            codes.intersection(
+                {
+                    DecisionEvidenceCode.AOI_LOCATION_INSIDE,
+                    DecisionEvidenceCode.AOI_LOCATION_REACTING,
+                    DecisionEvidenceCode.AOI_LOCATION_ENTRY_WINDOW,
+                },
+            ),
+        )
+        return (
+            self._aoi_presence_item(
+                item_id="aoi.weekly",
+                label="Weekly AOI",
+                timeframe=Timeframe.WEEKLY,
+                active_code=DecisionEvidenceCode.WEEKLY_AOI_ACTIVE,
+                codes=codes,
+                missing=missing,
+            ),
+            self._aoi_presence_item(
+                item_id="aoi.daily",
+                label="Daily AOI",
+                timeframe=Timeframe.DAILY,
+                active_code=DecisionEvidenceCode.DAILY_AOI_ACTIVE,
+                codes=codes,
+                missing=missing,
+            ),
+            self._aoi_item(
+                item_id="aoi.weekly_daily_overlap",
+                status=(
+                    ChecklistItemStatus.PASS
+                    if DecisionEvidenceCode.WEEKLY_DAILY_AOI_OVERLAP in codes
+                    else ChecklistItemStatus.MISSING
+                    if missing
+                    else ChecklistItemStatus.WARNING
+                ),
+                label="Weekly/Daily AOI confluence",
+                description=(
+                    "weekly_daily_aoi_overlap"
+                    if DecisionEvidenceCode.WEEKLY_DAILY_AOI_OVERLAP in codes
+                    else "weekly_daily_aoi_overlap_missing"
+                ),
+                evidence_codes=(
+                    (DecisionEvidenceCode.WEEKLY_DAILY_AOI_OVERLAP.value,)
+                    if DecisionEvidenceCode.WEEKLY_DAILY_AOI_OVERLAP in codes
+                    else ()
+                ),
+                severity=(
+                    "info"
+                    if DecisionEvidenceCode.WEEKLY_DAILY_AOI_OVERLAP in codes
+                    else "warning"
+                ),
+            ),
+            self._aoi_item(
+                item_id="aoi.location_gate",
+                status=(
+                    ChecklistItemStatus.PASS
+                    if location_passed
+                    else ChecklistItemStatus.MISSING
+                    if missing
+                    else ChecklistItemStatus.FAIL
+                    if location_failed
+                    else ChecklistItemStatus.WARNING
+                ),
+                label="AOI location gate",
+                description=(
+                    "aoi_location_gate_open"
+                    if location_passed
+                    else "aoi_data_missing"
+                    if missing
+                    else "aoi_location_not_eligible"
+                    if location_failed
+                    else "aoi_location_gate_unconfirmed"
+                ),
+                evidence_codes=tuple(
+                    code.value
+                    for code in (
+                        DecisionEvidenceCode.AOI_LOCATION_INSIDE,
+                        DecisionEvidenceCode.AOI_LOCATION_REACTING,
+                        DecisionEvidenceCode.AOI_LOCATION_ENTRY_WINDOW,
+                        DecisionEvidenceCode.AOI_LOCATION_NOT_ELIGIBLE,
+                        DecisionEvidenceCode.AOI_MOVED_AWAY,
+                        DecisionEvidenceCode.AOI_DATA_MISSING,
+                    )
+                    if code in codes
+                ),
+                severity="info" if location_passed else "blocking" if location_failed or missing else "warning",
+            ),
+        )
+
+    def _aoi_presence_item(
+        self,
+        *,
+        item_id: str,
+        label: str,
+        timeframe: Timeframe,
+        active_code: DecisionEvidenceCode,
+        codes: set[DecisionEvidenceCode],
+        missing: bool,
+    ) -> ChecklistItem:
+        active = active_code in codes
+        return self._aoi_item(
+            item_id=item_id,
+            status=ChecklistItemStatus.PASS if active else ChecklistItemStatus.MISSING if missing else ChecklistItemStatus.WARNING,
+            label=label,
+            description=active_code.value if active else f"{active_code.value}_missing",
+            evidence_codes=(active_code.value,) if active else (),
+            severity="info" if active else "warning",
+            timeframe=timeframe,
         )
 
     def _risk_items(self, checklist_input: ChecklistInput) -> tuple[ChecklistItem, ...]:
@@ -316,4 +452,26 @@ class ChecklistEngine:
             evidence_codes=evidence_codes,
             severity=severity,
             metadata=metadata or {},
+        )
+
+    def _aoi_item(
+        self,
+        *,
+        item_id: str,
+        status: ChecklistItemStatus,
+        label: str,
+        description: str,
+        evidence_codes: tuple[str, ...],
+        severity: str,
+        timeframe: Timeframe | None = None,
+    ) -> ChecklistItem:
+        return self._item(
+            item_id=item_id,
+            category=ChecklistCategory.AOI_LOCATION,
+            status=status,
+            label=label,
+            description=description,
+            timeframe=timeframe,
+            evidence_codes=evidence_codes,
+            severity=severity,
         )

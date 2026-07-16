@@ -28,6 +28,7 @@ class EntryDirection(str, Enum):
 
 
 class DecisionEvidenceCode(str, Enum):
+    ALIGNMENT_DATA_MISSING = "alignment_data_missing"
     ALIGNMENT_WEAK_OR_NEUTRAL = "alignment_weak_or_neutral"
     HIGHER_TIMEFRAMES_ALIGNED = "higher_timeframes_aligned"
     HIGHER_TIMEFRAME_CONFLICT = "higher_timeframe_conflict"

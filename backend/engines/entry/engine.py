@@ -32,12 +32,11 @@ class EntrySignalEngine:
                 direction=EntryDirection.NONE,
                 confidence=0.1,
                 evidence=(
-                    self._alignment_evidence(
-                        DecisionEvidenceCode.ALIGNMENT_WEAK_OR_NEUTRAL,
-                        DecisionEvidencePolarity.NEUTRAL,
-                        DecisionEvidenceSeverity.BLOCKING,
-                        "alignment_weak_or_neutral",
-                        signal_input,
+                    self._alignment_blocking_evidence(signal_input),
+                    *(
+                        self._aoi_gate_blocking_evidence(signal_input)
+                        if signal_input.alignment is None
+                        else ()
                     ),
                     *self._missing_evidence(signal_input),
                 ),
@@ -367,6 +366,20 @@ class EntrySignalEngine:
             return ()
         codes = set(gate.reason_codes)
         evidence: list[DecisionEvidence] = []
+        if "aoi_data_missing" in codes:
+            evidence.append(
+                self._status_evidence(
+                    DecisionEvidenceCode.AOI_DATA_MISSING,
+                    DecisionEvidenceCategory.AOI,
+                    DecisionEvidencePolarity.MISSING,
+                    DecisionEvidenceSeverity.BLOCKING,
+                    "aoi_data_missing",
+                    metadata={
+                        "missing_key": "weekly_daily_aoi_location",
+                        "reason_codes": ",".join(gate.reason_codes),
+                    },
+                ),
+            )
         if "aoi_moved_away" in codes:
             evidence.append(
                 self._status_evidence(
@@ -378,19 +391,20 @@ class EntrySignalEngine:
                     metadata={"condition": "price_moved_away_from_weekly_daily_aoi"},
                 ),
             )
-        evidence.append(
-            self._status_evidence(
-                DecisionEvidenceCode.AOI_LOCATION_NOT_ELIGIBLE,
-                DecisionEvidenceCategory.AOI,
-                DecisionEvidencePolarity.OPPOSES,
-                DecisionEvidenceSeverity.BLOCKING,
-                "aoi_location_not_eligible",
-                metadata={
-                    "condition": "price_not_inside_touching_reacting_or_entry_window",
-                    "reason_codes": ",".join(gate.reason_codes),
-                },
-            ),
-        )
+        if "aoi_location_not_eligible" in codes:
+            evidence.append(
+                self._status_evidence(
+                    DecisionEvidenceCode.AOI_LOCATION_NOT_ELIGIBLE,
+                    DecisionEvidenceCategory.AOI,
+                    DecisionEvidencePolarity.OPPOSES,
+                    DecisionEvidenceSeverity.BLOCKING,
+                    "aoi_location_not_eligible",
+                    metadata={
+                        "condition": "price_not_inside_touching_reacting_or_entry_window",
+                        "reason_codes": ",".join(gate.reason_codes),
+                    },
+                ),
+            )
         return tuple(evidence)
 
     def _aoi_support_evidence(self, signal_input: EntrySignalInput) -> tuple[DecisionEvidence, ...]:
@@ -464,6 +478,23 @@ class EntrySignalEngine:
             DecisionEvidencePolarity.SUPPORTS,
             DecisionEvidenceSeverity.INFO,
             "higher_timeframes_aligned",
+            signal_input,
+        )
+
+    def _alignment_blocking_evidence(self, signal_input: EntrySignalInput) -> DecisionEvidence:
+        if signal_input.alignment is None:
+            return self._alignment_evidence(
+                DecisionEvidenceCode.ALIGNMENT_DATA_MISSING,
+                DecisionEvidencePolarity.MISSING,
+                DecisionEvidenceSeverity.BLOCKING,
+                "alignment_data_missing",
+                signal_input,
+            )
+        return self._alignment_evidence(
+            DecisionEvidenceCode.ALIGNMENT_WEAK_OR_NEUTRAL,
+            DecisionEvidencePolarity.NEUTRAL,
+            DecisionEvidenceSeverity.BLOCKING,
+            "alignment_weak_or_neutral",
             signal_input,
         )
 

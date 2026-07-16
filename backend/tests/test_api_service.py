@@ -301,6 +301,25 @@ def test_data_readiness_reports_insufficient_higher_timeframes_for_short_history
     assert intelligence_payload["entry_decision"]["state"] == "WAIT"
     assert intelligence_payload["metadata"]["readiness_state"] == "INSUFFICIENT_DATA"
     assert intelligence_payload["readiness"]["reason"] == "insufficient_historical_range"
+    evidence_codes = {
+        item["code"]
+        for item in intelligence_payload["entry_decision"]["evidence"]
+    }
+    assert "alignment_data_missing" in evidence_codes
+    assert "alignment_weak_or_neutral" not in evidence_codes
+    assert "aoi_data_missing" in evidence_codes
+    assert intelligence_payload["aoi_gate"]["eligible"] is False
+    assert "aoi_data_missing" in intelligence_payload["aoi_gate"]["reason_codes"]
+    assert intelligence_payload["setup_score"]["metadata"]["aoi_gate_failed"] is True
+
+    checklist_items = {
+        item["id"]: item
+        for item in intelligence_payload["checklist"]["items"]
+    }
+    assert checklist_items["aoi.weekly"]["status"] == "MISSING"
+    assert checklist_items["aoi.daily"]["status"] == "MISSING"
+    assert checklist_items["aoi.weekly_daily_overlap"]["status"] == "MISSING"
+    assert checklist_items["aoi.location_gate"]["status"] == "MISSING"
 
 
 def test_readiness_reports_generated_higher_timeframes_for_long_fixture(tmp_path: Path) -> None:
