@@ -57,6 +57,28 @@ class DemoSettings(BaseModel):
     enabled: bool = True
 
 
+class MarketDataSyncSettings(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = False
+    startup_enabled: bool = False
+    exchange: str = "bitmart"
+    market_type: str = "usdt_m_perpetual"
+    quote_asset: str = "USDT"
+    history_horizon_days: int = Field(default=180, ge=1)
+    canonical_timeframe: Timeframe = Timeframe.ONE_MINUTE
+    max_concurrent_jobs: int = Field(default=2, ge=1)
+    page_size: int = Field(default=500, ge=1)
+    retry_count: int = Field(default=3, ge=0)
+    backoff_initial_seconds: float = Field(default=0.25, ge=0)
+    backoff_multiplier: float = Field(default=2.0, ge=1)
+    request_pacing_seconds: float = Field(default=0.0, ge=0)
+    data_root: Path = Path("data") / "market_data"
+    metadata_database_path: Path = Path("data") / "market_data" / "sync_metadata.sqlite3"
+    priority_symbols: tuple[str, ...] = ("BTCUSDT",)
+    scanner_ready_only: bool = True
+
+
 class PlatformSettings(BaseModel):
     """Typed configuration contract for CFG-001."""
 
@@ -68,6 +90,7 @@ class PlatformSettings(BaseModel):
     storage: StorageSettings
     logging: LoggingSettings
     demo: DemoSettings = Field(default_factory=DemoSettings)
+    market_data_sync: MarketDataSyncSettings = Field(default_factory=MarketDataSyncSettings)
 
 
 def load_settings(path: Path | None = None) -> PlatformSettings:

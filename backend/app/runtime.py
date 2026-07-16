@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum
@@ -64,6 +65,7 @@ from backend.engines.trend import (
     TrendEngine,
     TrendState,
 )
+from backend.exchange import BitMartFuturesMarketDataAdapter, ExchangeName, MarketType
 from backend.models import Candle, Timeframe, Trade
 from backend.pipelines.candle import CandleClosedEvent, OneMinuteCandlePipeline
 from backend.pipelines.market_data import (
@@ -75,7 +77,14 @@ from backend.pipelines.market_data import (
     MarketDataStatusEvent,
 )
 from backend.pipelines.timeframe import TimeframeCandleClosedEvent, TimeframePipeline
-from backend.storage import InMemoryCandleStore
+from backend.storage import InMemoryCandleStore, JsonlCandleHistoryStore
+from backend.sync import (
+    IncrementalSyncPlanner,
+    MarketDataSyncCoordinator,
+    SQLiteSyncMetadataStore,
+    SyncCoordinatorStatus,
+    SymbolSyncStatus,
+)
 from backend.app.demo import seed_demo_visualization_data
 from backend.app.replay_runtime import ReplaySourceType, ReplayStatusSnapshot, RuntimeReplayService
 
@@ -196,11 +205,17 @@ class BackendRuntime:
         live_stream_runner_factory: LiveStreamRunnerFactory | None = None,
         historical_config: HistoricalRuntimeConfig | None = None,
         historical_loader: HistoricalCandleLoader | None = None,
+        market_data_sync_coordinator: MarketDataSyncCoordinator | None = None,
     ) -> None:
         self.settings = settings or load_settings()
         self.mode = mode
         self.historical_config = historical_config
         self._historical_loader = historical_loader
+        self.market_data_sync_coordinator = (
+            market_data_sync_coordinator
+            if market_data_sync_coordinator is not None
+            else self._build_market_data_sync_coordinator_if_enabled()
+        )
         self.event_bus = EventBus()
         self.candle_store = InMemoryCandleStore()
         self.market_data_parser = BinanceTradeMessageParser()
@@ -269,6 +284,7 @@ class BackendRuntime:
         self._load_historical_data_if_enabled()
         self._seed_demo_data_if_enabled()
         self._state = RuntimeState.RUNNING
+        self._start_market_data_sync_if_enabled()
         self._start_live_stream_if_enabled()
         self._logger.info("Backend runtime started")
 
@@ -278,6 +294,8 @@ class BackendRuntime:
         if self._live_stream_runner is not None:
             self._live_stream_runner.stop()
             self._stream_status = MarketDataConnectionStatus.STOPPED
+        if self.market_data_sync_coordinator is not None:
+            self.market_data_sync_coordinator.stop()
         self._state = RuntimeState.STOPPED
         self._logger.info("Backend runtime stopped")
 
@@ -308,6 +326,11 @@ class BackendRuntime:
             ComponentHealth("structure_engine", status, "created lazily per symbol/timeframe"),
             ComponentHealth("trend_engine", status, "created lazily per symbol/timeframe"),
             ComponentHealth("aoi_engine", status, "weekly/daily AOI foundation ready"),
+            ComponentHealth(
+                "market_data_sync",
+                self._market_data_sync_component_status(),
+                self._market_data_sync_component_message(),
+            ),
             ComponentHealth("multi_timeframe_aggregator", status, "aggregates trend snapshots"),
             ComponentHealth("replay_engine", status, self._replay_component_message()),
             ComponentHealth("scanner", status, "scanner foundation ready"),
@@ -431,7 +454,15 @@ class BackendRuntime:
     ) -> ScannerSummary:
         """Run ScannerEngine over existing runtime snapshots for FR-901 through FR-905."""
 
-        scan_symbols = symbols or tuple(self.settings.market_data.symbols)
+        if symbols is None and self.settings.market_data_sync.scanner_ready_only:
+            ready_symbols = (
+                self.market_data_sync_coordinator.ready_symbols()
+                if self.market_data_sync_coordinator is not None
+                else ()
+            )
+            scan_symbols = ready_symbols or tuple(self.settings.market_data.symbols)
+        else:
+            scan_symbols = symbols or tuple(self.settings.market_data.symbols)
         inputs = tuple(self._scanner_input_for(symbol, timeframe) for symbol in scan_symbols)
         self._scanner_summary = self.scanner.scan(
             inputs,
@@ -877,7 +908,11 @@ class BackendRuntime:
 
     @property
     def demo_data_enabled(self) -> bool:
-        return self.mode is RuntimeMode.DRY_RUN and self.settings.demo.enabled
+        return (
+            self.mode is RuntimeMode.DRY_RUN
+            and self.settings.demo.enabled
+            and not self.settings.market_data_sync.enabled
+        )
 
     @property
     def historical_data_enabled(self) -> bool:
@@ -885,6 +920,30 @@ class BackendRuntime:
             self.mode in {RuntimeMode.HISTORICAL, RuntimeMode.HISTORICAL_LIVE}
             and self.historical_config is not None
         )
+
+    @property
+    def market_data_sync_enabled(self) -> bool:
+        return self.settings.market_data_sync.enabled
+
+    def market_data_sync_status(self) -> SyncCoordinatorStatus | None:
+        if self.market_data_sync_coordinator is None:
+            return None
+        return self.market_data_sync_coordinator.status()
+
+    def start_market_data_sync(self) -> SyncCoordinatorStatus | None:
+        if self.market_data_sync_coordinator is None:
+            return None
+        return self.market_data_sync_coordinator.run_once()
+
+    def sync_market_data_symbol(self, symbol: str, *, gap_repair: bool = False) -> SymbolSyncStatus | None:
+        if self.market_data_sync_coordinator is None:
+            return None
+        return self.market_data_sync_coordinator.sync_symbol(symbol, gap_repair=gap_repair)
+
+    def market_data_contracts(self) -> tuple[str, ...]:
+        if self.market_data_sync_coordinator is None:
+            return ()
+        return tuple(status.canonical_symbol for status in self.market_data_sync_coordinator.status().symbols)
 
     def _build_binance_stream_client(self) -> BinanceTradeStreamClient:
         return BinanceTradeStreamClient(
@@ -897,6 +956,46 @@ class BackendRuntime:
             parser=self.market_data_parser,
             pipeline=self.market_data_pipeline,
         )
+
+    def _build_market_data_sync_coordinator_if_enabled(self) -> MarketDataSyncCoordinator | None:
+        if not self.settings.market_data_sync.enabled:
+            return None
+        sync_settings = self.settings.market_data_sync
+        exchange = ExchangeName(sync_settings.exchange)
+        market_type = MarketType(sync_settings.market_type)
+        metadata_store = SQLiteSyncMetadataStore(sync_settings.metadata_database_path)
+        history_store = JsonlCandleHistoryStore(sync_settings.data_root)
+        adapter = BitMartFuturesMarketDataAdapter(
+            page_size=sync_settings.page_size,
+            clock_ms=current_time_ms,
+        )
+        horizon_ms = sync_settings.history_horizon_days * 24 * 60 * 60 * 1000
+        planner = IncrementalSyncPlanner(
+            history_store=history_store,
+            history_horizon_ms=horizon_ms,
+            exchange=exchange,
+            market_type=market_type,
+            priority_symbols=sync_settings.priority_symbols,
+        )
+        return MarketDataSyncCoordinator(
+            adapter=adapter,
+            history_store=history_store,
+            metadata_store=metadata_store,
+            planner=planner,
+            exchange=exchange,
+            market_type=market_type,
+            max_concurrent_jobs=sync_settings.max_concurrent_jobs,
+            page_size=sync_settings.page_size,
+            clock_ms=current_time_ms,
+        )
+
+    def _start_market_data_sync_if_enabled(self) -> None:
+        if (
+            self.market_data_sync_coordinator is not None
+            and self.settings.market_data_sync.enabled
+            and self.settings.market_data_sync.startup_enabled
+        ):
+            self.market_data_sync_coordinator.start_background()
 
     def _start_live_stream_if_enabled(self) -> None:
         if not self.stream_enabled:
@@ -1107,11 +1206,32 @@ class BackendRuntime:
     def _demo_component_message(self) -> str:
         if self.mode is not RuntimeMode.DRY_RUN:
             return "disabled outside dry-run mode"
+        if self.settings.market_data_sync.enabled:
+            return "disabled while exchange synchronization is enabled"
         if not self.settings.demo.enabled:
             return "disabled by config"
         if self._demo_seeded:
             return f"seeded deterministic visualization data for {self.active_symbol}"
         return "ready to seed deterministic visualization data"
+
+    def _market_data_sync_component_status(self) -> ComponentStatus:
+        if not self.settings.market_data_sync.enabled:
+            return ComponentStatus.DISABLED
+        if self.market_data_sync_coordinator is None:
+            return ComponentStatus.STOPPED
+        status = self.market_data_sync_coordinator.status()
+        return ComponentStatus.RUNNING if status.running else ComponentStatus.READY
+
+    def _market_data_sync_component_message(self) -> str:
+        if not self.settings.market_data_sync.enabled:
+            return "disabled by config"
+        if self.market_data_sync_coordinator is None:
+            return "not configured"
+        status = self.market_data_sync_coordinator.status()
+        return (
+            f"{status.exchange.value}:{status.market_type.value} "
+            f"ready={status.queue.ready} queued={status.queue.queued} failed={status.queue.failed}"
+        )
 
     def _historical_component_status(self) -> ComponentStatus:
         if not self.historical_data_enabled:
@@ -1316,3 +1436,7 @@ def structure_event_identity(event: StructureEvent) -> tuple[str, Timeframe]:
     if event.break_of_structure is not None:
         return event.break_of_structure.symbol, event.break_of_structure.timeframe
     raise ValueError("StructureEvent must contain structure data")
+
+
+def current_time_ms() -> int:
+    return int(time.time() * 1000)

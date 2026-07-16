@@ -244,3 +244,22 @@ Design notes:
 - Calibration values for production AOI sizing, proximity, and entry-window behavior remain unresolved.
 
 Verification: backend and frontend test coverage added; full verification is required before commit.
+
+### M31 - Exchange Abstraction and Background Market Data Synchronization Foundation
+
+Implemented an opt-in backend foundation for exchange-agnostic historical market-data synchronization without changing trading-analysis logic.
+
+Implemented scope:
+
+- `EXCHANGE-001` to `EXCHANGE-006`: generic market-data adapter protocol, BitMart USDT-M public adapter, active USDT perpetual discovery, completed 1m candle pagination, retry/backoff handling, and canonical symbol normalization.
+- `STORAGE-001` to `STORAGE-006`: canonical 1m history store boundary, idempotent upserts, range queries, gap detection, JSONL development persistence, and SQLite sync metadata/checkpoints.
+- `SYNC-001` to `SYNC-012`: incremental initial backfill/catch-up/gap-repair planning, bounded sync coordination, per-symbol error isolation, runtime lifecycle integration, status APIs, scanner-ready universe provider, and disabled-by-default configuration.
+
+Design notes:
+
+- Market-data sync does not call candle, structure, trend, entry, risk, checklist, scoring, AOI, scanner, or AI engines.
+- The scanner can use synchronized READY symbols as a universe boundary, while explicit symbol requests remain honored.
+- BitMart network access is behind an injectable transport; tests use deterministic fakes and make no real network calls.
+- JSONL history storage is a development foundation. Larger universe retention will likely need a columnar or database-backed store.
+
+Verification: covered by backend pytest, ruff, and mypy.

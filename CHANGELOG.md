@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- M31: Exchange abstraction and market-data synchronization foundation.
+- Generic public market-data adapter protocol.
+- BitMart USDT-M active contract discovery and completed 1m historical candle adapter foundation.
+- Canonical 1m history store boundary with idempotent upserts and gap detection.
+- SQLite synchronization metadata/checkpoints and bounded synchronization coordinator.
+- Market-data sync runtime/API status boundaries and scanner-ready universe provider.
+
+### Notes
+
+- Market-data synchronization is disabled by default.
+- Tests use deterministic fakes and do not make real exchange network calls.
+
 ## v0.1.0 - Foundation Release
 
 Completed Milestones M1-M10.

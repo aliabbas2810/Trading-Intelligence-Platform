@@ -33,3 +33,23 @@ logging:
 
 demo:
   enabled: true
+
+market_data_sync:
+  enabled: false
+  startup_enabled: false
+  exchange: bitmart
+  market_type: usdt_m_perpetual
+  quote_asset: USDT
+  history_horizon_days: 180
+  canonical_timeframe: 1m
+  max_concurrent_jobs: 2
+  page_size: 500
+  retry_count: 3
+  backoff_initial_seconds: 0.25
+  backoff_multiplier: 2.0
+  request_pacing_seconds: 0.0
+  data_root: data/market_data
+  metadata_database_path: data/market_data/sync_metadata.sqlite3
+  priority_symbols:
+    - BTCUSDT
+  scanner_ready_only: true

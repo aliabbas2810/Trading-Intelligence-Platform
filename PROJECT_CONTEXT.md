@@ -30,7 +30,7 @@ The platform starts with Binance Spot trade data and BTCUSDT, but the backend no
 | M10 | Completed | Backend AI decision engine foundation with structured input and deterministic mock provider. |
 | M11-M20 | Completed | Runtime/API/frontend stabilization through local runnable backend, live Binance mode wiring, API service, visualization data connection, demo data, replay controls, scanner API/UI, AI decision API, and non-destructive chart replay cursor. |
 | M21-M26 | Completed | Entry, risk, checklist, setup scoring, consolidated trading intelligence API, and Trading Intelligence Panel. |
-| M27-M30 | In progress | Historical validation/runtime modes, Weekly/Daily AOI foundation, AOI visualization, and AOI hard-gate integration. |
+| M27-M31 | Completed | Historical validation/runtime modes, Weekly/Daily AOI foundation, AOI visualization/gating, and exchange synchronization foundation. |
 
 ## Current Architecture
 
@@ -40,9 +40,11 @@ TIP is organized around pipelines and engines:
 - `backend/config/`: Pydantic settings and version-controlled defaults.
 - `backend/models/`: canonical domain objects such as `Trade`, `Candle`, and `Timeframe`.
 - `backend/pipelines/market_data/`: Binance trade parsing, validation, status events, and stream-client skeleton.
+- `backend/exchange/`: exchange-agnostic public market-data adapter contracts and BitMart USDT-M adapter foundation.
 - `backend/pipelines/candle/`: deterministic 1-minute candle building from canonical trade events.
 - `backend/pipelines/timeframe/`: deterministic 4H, Daily, and Weekly aggregation from closed 1-minute candles.
 - `backend/storage/`: in-memory and JSONL candle persistence boundaries.
+- `backend/sync/`: incremental market-data synchronization planning, metadata checkpoints, bounded coordination, and scanner-ready universe boundary.
 - `backend/engines/structure/`: body-only market structure detection.
 - `backend/engines/trend/`: trend classification and multi-timeframe trend aggregation.
 - `backend/engines/replay/`: replay sources and controller that reuse the event bus.
@@ -79,6 +81,8 @@ TIP is organized around pipelines and engines:
 
 The backend can normalize trades, build and persist candles, aggregate higher timeframes, detect body-based structure, classify trends, aggregate multi-timeframe trend state, expose local API endpoints, replay historical events through deterministic replay components, drive non-destructive chart replay with a cursor, scan existing outputs for ranked setup candidates, classify entry state, produce deterministic risk plans, produce evidence-driven checklists, produce weighted setup scores, return consolidated trading-intelligence chains, and produce structured mock AI decision outputs.
 
+M31 adds an opt-in exchange synchronization foundation. The backend now has a generic exchange market-data adapter interface, a BitMart USDT-M public adapter for active contract discovery and completed 1m candle retrieval, a canonical 1m history store boundary, SQLite sync metadata/checkpoints, incremental sync planning, bounded per-symbol coordination, sync status APIs, and a scanner-ready symbol universe boundary. The feature is disabled by default and does not change trading-analysis algorithms.
+
 The backend also has a Weekly/Daily AOI foundation and strategy gate. Precomputed bullish
 HL-to-HH or bearish LH-to-LL legs define the search range; at least three candle-body
 interactions confirm a zone. Wicks are excluded during historical construction but may count
@@ -104,8 +108,9 @@ Recommended next phase: continue Phase 3 validation.
 
 Near-term focus:
 
+- Validate exchange-synchronized historical data against real market periods.
+- Harden market-data storage for larger universes beyond the current JSONL foundation.
 - Validate AOI sizing/location calibration on historical and live market data.
-- Add stronger historical acceptance tests for AOI gate behavior.
 - Improve frontend visualization maturity without moving strategy logic into the UI.
 - Keep real LLM providers and order execution out of scope until deterministic behavior is validated.
 

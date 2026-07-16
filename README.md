@@ -6,10 +6,10 @@ The system uses an event-driven Python backend, a FastAPI API service, and a Rea
 
 ## Current Status
 
-- Version/status: v0.3.1, active development.
-- Completed milestones: M1-M26.
-- Latest major capability: Trading Intelligence Panel in the React frontend.
-- Backend verification: 167 pytest tests passing as of the v0.3.1 correctness pass.
+- Version/status: active development after v0.3.1.
+- Completed milestones: M1-M31.
+- Latest major capability: Exchange abstraction and background market-data synchronization foundation.
+- Backend verification: 217 pytest tests passing after M31.
 - Frontend verification: 26 frontend contract tests passing as of M26.
 
 TIP is not production-ready trading software. It is a local-first deterministic analysis platform under active development.
@@ -20,6 +20,7 @@ Core processing flow:
 
 ```text
 Market Data
+-> Exchange Sync / Historical Store
 -> Candle Builder
 -> Timeframe Aggregation
 -> Market Structure
@@ -41,6 +42,8 @@ Repository areas:
 - `backend/config/`: Pydantic settings and default configuration.
 - `backend/models/`: canonical domain contracts such as trades, candles, and timeframes.
 - `backend/pipelines/`: market data, candle, and timeframe pipelines.
+- `backend/exchange/`: exchange-agnostic public market-data adapter contracts and BitMart USDT-M adapter foundation.
+- `backend/sync/`: incremental synchronization planning, metadata checkpoints, bounded coordination, and scanner-ready symbol universe boundary.
 - `backend/engines/`: structure, trend, replay, scanner, entry, risk, checklist, scoring, intelligence, and AI engines.
 - `backend/storage/`: in-memory and file persistence boundaries.
 - `backend/api/`: FastAPI transport/read/action boundaries.
@@ -97,6 +100,7 @@ The platform currently supports:
 - M24: Setup Scoring Engine.
 - M25: Consolidated Trading Intelligence API.
 - M26: Trading Intelligence Panel.
+- M27-M31: Historical validation/runtime modes, AOI foundation and visualization/gate integration, and exchange synchronization foundation.
 
 ## Implemented Capabilities
 
@@ -113,6 +117,10 @@ The platform currently supports:
 - Setup Scoring Engine.
 - Consolidated Trading Intelligence API.
 - Trading Intelligence Panel.
+- Exchange abstraction for public market data.
+- BitMart USDT-M active contract discovery and historical completed 1m candle adapter foundation.
+- Incremental market-data synchronization planner, metadata checkpoints, and status APIs.
+- Scanner-ready symbol universe boundary based on completed sync state.
 - Deterministic mock AI decision provider.
 - API smoke test script.
 - v0.3.1 system correctness tests.
@@ -175,6 +183,16 @@ Run the API smoke test while the backend is running:
 py -3.12 scripts/smoke_api.py --base-url http://127.0.0.1:8000 --symbol BTCUSDT --timeframe 4h
 ```
 
+Market-data synchronization is disabled by default. Enable it in configuration before using the M31 sync APIs:
+
+```yaml
+market_data_sync:
+  enabled: true
+  startup_enabled: false
+  exchange: bitmart
+  market_type: usdt_m_perpetual
+```
+
 Frontend API configuration defaults to `http://127.0.0.1:8000`. Override it when needed:
 
 ```powershell
@@ -222,6 +240,8 @@ npm test
 
 - Demo data is synthetic.
 - Historical and historical-live modes load local/downloaded candle data into the same read APIs as the frontend, but historical replay controls are not implemented yet.
+- M31 exchange synchronization is a foundation: it is opt-in, currently includes a BitMart USDT-M public adapter, and uses JSONL/SQLite local storage suitable for development rather than production-scale retention.
+- Scanner all-symbol execution is gated to synchronized READY symbols only when the sync foundation is enabled; live all-symbol streaming is not implemented.
 - Current correctness proves integration consistency, not real-market strategy validity.
 - Real HH/HL/LH/LL, BOS, trend, AOI, entry, and risk correctness still needs historical and live-market validation.
 - AOI sizing, proximity tolerance, entry-window excursion, and ranking weights are not production calibrated.

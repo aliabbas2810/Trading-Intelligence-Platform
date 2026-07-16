@@ -93,6 +93,9 @@ Requirement IDs use the following prefixes:
 | CHECKLIST | Checklist Requirement |
 | SCORE | Setup Scoring Requirement |
 | INTEL | Trading Intelligence Requirement |
+| EXCHANGE | Exchange Abstraction Requirement |
+| STORAGE | Historical Storage Requirement |
+| SYNC | Market Data Synchronization Requirement |
 
 Priorities:
 
@@ -983,6 +986,126 @@ or ineligible.
 The AOI gate shall not change AOI discovery semantics, market structure detection, trend
 classification, risk rules, order execution, BitMart synchronization, or real LLM behavior.
 
+## 11C. Exchange Abstraction and Market Data Synchronization Requirements
+
+### EXCHANGE-001 - Exchange-Agnostic Market Data Interface
+
+The platform shall expose a generic public market-data adapter interface for contract
+discovery, historical candle fetching, latest completed candle time, symbol normalization,
+contract metadata, and rate-limit metadata.
+
+### EXCHANGE-002 - BitMart USDT-M Adapter Foundation
+
+The platform shall include a BitMart public futures adapter foundation for active USDT-M
+perpetual contracts without private/account/order APIs or API keys.
+
+### EXCHANGE-003 - Contract Metadata Normalization
+
+Exchange adapters shall normalize exchange-specific contract responses into generic
+ContractMetadata including canonical symbol, assets, market type, status, tick/step sizes,
+listing time, perpetual/active flags, and metadata timestamp.
+
+### EXCHANGE-004 - Exchange DTO Isolation
+
+Downstream candle, structure, trend, AOI, scanner, entry, risk, checklist, scoring, and AI
+code shall not depend on BitMart-specific DTOs.
+
+### EXCHANGE-005 - Historical Candle Pagination
+
+Adapters shall fetch historical completed 1m candles using deterministic pagination,
+deduplication, current-candle exclusion, retry hooks, and injectable transports for tests.
+
+### EXCHANGE-006 - Binance Compatibility
+
+Existing Binance market-data foundations shall remain supported and must not be broken by
+the exchange abstraction.
+
+### STORAGE-001 - Canonical 1m History Store
+
+The platform shall treat completed one-minute candles as the canonical stored historical
+source for synchronization.
+
+### STORAGE-002 - Higher Timeframes Derived Internally
+
+The platform shall not download all higher timeframes separately for synchronization; 5m,
+15m, 30m, 1h, 2h, 4h, 1d, and 1w shall remain derived from canonical 1m candles.
+
+### STORAGE-003 - Idempotent Upsert and Deduplication
+
+Historical storage shall upsert/deduplicate by exchange, symbol, timeframe, and open time.
+
+### STORAGE-004 - Range Queries and Counts
+
+Historical storage shall support first/last stored timestamp, range query, and candle count
+operations.
+
+### STORAGE-005 - Gap Detection
+
+Historical storage shall detect missing one-minute intervals for a symbol/time range.
+
+### STORAGE-006 - Future Backend Compatibility
+
+The storage boundary shall preserve JSONL compatibility while allowing future Parquet or
+DuckDB implementations.
+
+### SYNC-001 - Incremental Startup Planning
+
+The synchronization planner shall download only missing completed 1m candles on startup.
+
+### SYNC-002 - Initial Backfill Horizon
+
+Initial backfill shall start at the configured history horizon or contract listing time,
+whichever is later.
+
+### SYNC-003 - Catch-Up Planning
+
+For existing local data, catch-up shall start from last local completed open time plus one
+minute and end at the latest fully completed remote minute.
+
+### SYNC-004 - Gap Repair Planning
+
+The planner shall support explicit gap-repair intervals using detected missing 1m candles.
+
+### SYNC-005 - Persistent Checkpoints
+
+Synchronization metadata shall persist exchange, market type, symbol, candle bounds,
+remote latest completed time, state, progress, retries, errors, gaps, and readiness state.
+
+### SYNC-006 - Restartable and Idempotent
+
+Synchronization shall be restartable and idempotent; interrupted work shall resume from
+stored history/checkpoints without redownloading the full horizon.
+
+### SYNC-007 - Bounded Coordinator
+
+The coordinator shall queue jobs with deterministic priority and bounded concurrency rather
+than launching unbounded per-symbol tasks.
+
+### SYNC-008 - Isolated Failures and Retries
+
+One-symbol failures shall not stop synchronization for other symbols; retry/backoff hooks
+shall be deterministic and bounded.
+
+### SYNC-009 - Runtime Integration
+
+BackendRuntime shall optionally start synchronization in the background, stop it cleanly,
+avoid demo seeding in sync mode, and expose sync health/status.
+
+### SYNC-010 - Sync API and Observability
+
+The API shall expose read/control endpoints for contracts, aggregate status, per-symbol
+status, start, symbol sync, and gap repair.
+
+### SYNC-011 - Structured Logging
+
+Synchronization shall log catalogue refresh, job execution, checkpoint updates, ready
+symbols, gap repair, retries, and failures without noisy per-candle INFO logging.
+
+### SYNC-012 - Scanner Readiness Boundary
+
+Scanner universe selection shall be able to include only symbols marked READY; non-ready
+symbols shall not be considered fully scanner-eligible.
+
 ---
 
 ## 12. Testing Requirements
@@ -1023,6 +1146,7 @@ Candle continuity, duplicate prevention, and timestamp alignment shall be testab
 | M25 | INTEL-001 to INTEL-006 | Trading intelligence API consolidation |
 | M29 | AOI-001 to AOI-010 | Weekly/Daily AOI engine foundation |
 | M30 | AOI-VIS-001 to AOI-VIS-006, AOI-GATE-001 to AOI-GATE-006 | AOI visualization and strategy-gate integration |
+| M31 | EXCHANGE-001 to EXCHANGE-006, STORAGE-001 to STORAGE-006, SYNC-001 to SYNC-012 | Exchange abstraction and market data synchronization foundation |
 
 ---
 

@@ -18,6 +18,7 @@ from backend.api.aoi import (
 )
 from backend.api.checklist import ChecklistEvaluateRequest, ChecklistResultResponse
 from backend.api.entry import EntryDecisionResponse, EntryEvaluateRequest
+from backend.api.market_data_sync import ContractsResponse, SyncCoordinatorStatusResponse, SymbolSyncStatusResponse
 from backend.api.replay import ReplayStartRequest, ReplayStatusResponse
 from backend.api.readiness import AnalysisReadinessResponse
 from backend.api.risk import RiskEvaluateRequest, RiskPlanResponse
@@ -104,6 +105,61 @@ def create_app(runtime: BackendRuntime | None = None) -> FastAPI:
 
         api = runtime_from_request(request).visualization_api
         return jsonable_encoder(api.get_multi_timeframe_alignment(symbol))
+
+    @app.get("/api/market-data/contracts")
+    def market_data_contracts(request: Request) -> object:
+        """Return synchronized/discovered market-data contracts for EXCHANGE-001."""
+
+        symbols = runtime_from_request(request).market_data_contracts()
+        return ContractsResponse(symbols=symbols, total=len(symbols))
+
+    @app.get("/api/market-data/sync/status")
+    def market_data_sync_status(request: Request) -> object:
+        """Return aggregate market-data sync status for SYNC-010."""
+
+        status = runtime_from_request(request).market_data_sync_status()
+        if status is None:
+            return {"enabled": False}
+        return SyncCoordinatorStatusResponse.from_status(status)
+
+    @app.get("/api/market-data/sync/status/{symbol}")
+    def market_data_sync_symbol_status(request: Request, symbol: str) -> object:
+        """Return per-symbol market-data sync status for SYNC-010."""
+
+        coordinator = runtime_from_request(request).market_data_sync_coordinator
+        if coordinator is None:
+            return {"enabled": False, "symbol": symbol}
+        status = coordinator.symbol_status(symbol)
+        if status is None:
+            return {"enabled": True, "symbol": symbol, "state": "UNKNOWN"}
+        return SymbolSyncStatusResponse.from_status(status)
+
+    @app.post("/api/market-data/sync/start")
+    def market_data_sync_start(request: Request) -> object:
+        """Run one deterministic synchronization pass for SYNC-007."""
+
+        status = runtime_from_request(request).start_market_data_sync()
+        if status is None:
+            return {"enabled": False}
+        return SyncCoordinatorStatusResponse.from_status(status)
+
+    @app.post("/api/market-data/sync/symbol/{symbol}")
+    def market_data_sync_symbol(request: Request, symbol: str) -> object:
+        """Synchronize one symbol through runtime orchestration."""
+
+        status = runtime_from_request(request).sync_market_data_symbol(symbol)
+        if status is None:
+            return {"enabled": False, "symbol": symbol}
+        return SymbolSyncStatusResponse.from_status(status)
+
+    @app.post("/api/market-data/sync/gap-repair/{symbol}")
+    def market_data_sync_gap_repair(request: Request, symbol: str) -> object:
+        """Run explicit gap-repair planning for one symbol."""
+
+        status = runtime_from_request(request).sync_market_data_symbol(symbol, gap_repair=True)
+        if status is None:
+            return {"enabled": False, "symbol": symbol}
+        return SymbolSyncStatusResponse.from_status(status)
 
     @app.get("/api/data-readiness")
     def data_readiness(request: Request, symbol: str) -> object:
