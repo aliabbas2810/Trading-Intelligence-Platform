@@ -100,17 +100,27 @@ class BitMartHistoricalCandleDownloader:
         self._limit = limit
 
     def load(self, request: HistoricalCandleRequest) -> tuple[Candle, ...]:
-        result = self._adapter.fetch_historical_candles(
-            ExchangeHistoricalCandleRequest(
-                exchange=ExchangeName(request.exchange),
-                market_type=MarketType(request.market_type),
-                symbol=request.symbol,
-                timeframe=request.timeframe,
-                start_time_ms=request.start_time_ms,
-                end_time_ms=request.end_time_ms,
-                limit=self._limit,
-            ),
+        exchange_request = ExchangeHistoricalCandleRequest(
+            exchange=ExchangeName(request.exchange),
+            market_type=MarketType(request.market_type),
+            symbol=request.symbol,
+            timeframe=request.timeframe,
+            start_time_ms=request.start_time_ms,
+            end_time_ms=request.end_time_ms,
+            limit=self._limit,
         )
+        result = self._adapter.fetch_historical_candles(exchange_request)
+        if not result.candles:
+            exchange_symbol = self._adapter.exchange_symbol_for(request.symbol)
+            raise RuntimeError(
+                "BitMart historical download returned zero candles "
+                "endpoint=/contract/public/kline "
+                f"symbol={exchange_symbol} "
+                f"start_time={request.start_time_ms // 1000} "
+                f"end_time={request.end_time_ms // 1000} "
+                f"pages={result.pages} "
+                f"latest_completed_time_ms={result.latest_completed_time_ms}",
+            )
         return result.candles
 
 
@@ -127,10 +137,10 @@ def candle_from_bitmart_kline(
         timeframe=timeframe,
         open_time_ms=open_time_s * 1000,
         close_time_ms=open_time_s * 1000 + duration_ms,
-        open=read_float(first_present(row, "open", "o"), "open"),
-        high=read_float(first_present(row, "high", "h"), "high"),
-        low=read_float(first_present(row, "low", "l"), "low"),
-        close=read_float(first_present(row, "close", "c"), "close"),
+        open=read_float(first_present(row, "open", "open_price", "o"), "open"),
+        high=read_float(first_present(row, "high", "high_price", "h"), "high"),
+        low=read_float(first_present(row, "low", "low_price", "l"), "low"),
+        close=read_float(first_present(row, "close", "close_price", "c"), "close"),
         volume=read_float(first_present(row, "volume", "vol", "v"), "volume"),
     )
 

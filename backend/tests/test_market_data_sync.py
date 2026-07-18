@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from backend.api.service import create_app
@@ -86,6 +87,33 @@ class FakeTransport:
         return {"data": {"klines": rows}}
 
 
+class BitMartPriceFieldTransport(FakeTransport):
+    def get_json(self, path: str, params: dict[str, str | int]) -> object:
+        self.calls.append((path, params))
+        if path.endswith("/details"):
+            return super().get_json(path, params)
+        return {
+            "data": [
+                {
+                    "timestamp": int(params["start_time"]),
+                    "open_price": "100",
+                    "high_price": "110",
+                    "low_price": "90",
+                    "close_price": "105",
+                    "volume": "1",
+                },
+            ],
+        }
+
+
+class BadKlineTransport(FakeTransport):
+    def get_json(self, path: str, params: dict[str, str | int]) -> object:
+        self.calls.append((path, params))
+        if path.endswith("/details"):
+            return super().get_json(path, params)
+        return {"data": [{"timestamp": int(params["start_time"]), "volume": "1"}]}
+
+
 def test_bitmart_discovers_only_active_usdt_perpetual_contracts() -> None:
     adapter = BitMartFuturesMarketDataAdapter(transport=FakeTransport(), clock_ms=lambda: NOW_MS)
 
@@ -120,6 +148,57 @@ def test_bitmart_historical_pagination_deduplicates_and_excludes_forming_candle(
     assert result.candles[-1].open_time_ms == NOW_MS - 60_000
     assert len({candle.open_time_ms for candle in result.candles}) == len(result.candles)
     assert result.pages >= 2
+
+
+def test_bitmart_historical_parser_accepts_real_price_field_names() -> None:
+    transport = BitMartPriceFieldTransport()
+    adapter = BitMartFuturesMarketDataAdapter(
+        transport=transport,
+        clock_ms=lambda: NOW_MS,
+    )
+    request = ExchangeHistoricalCandleRequest(
+        exchange=ExchangeName.BITMART,
+        market_type=MarketType.USDT_M_PERPETUAL,
+        symbol="BTCUSDT",
+        timeframe=Timeframe.ONE_MINUTE,
+        start_time_ms=0,
+        end_time_ms=60_000,
+        limit=500,
+    )
+
+    result = adapter.fetch_historical_candles(request)
+
+    assert len(result.candles) == 1
+    assert result.candles[0].open == 100.0
+    assert result.candles[0].high == 110.0
+    assert result.candles[0].low == 90.0
+    assert result.candles[0].close == 105.0
+
+
+def test_bitmart_historical_parse_failure_includes_download_diagnostics() -> None:
+    adapter = BitMartFuturesMarketDataAdapter(
+        transport=BadKlineTransport(),
+        clock_ms=lambda: NOW_MS,
+    )
+    request = ExchangeHistoricalCandleRequest(
+        exchange=ExchangeName.BITMART,
+        market_type=MarketType.USDT_M_PERPETUAL,
+        symbol="BTCUSDT",
+        timeframe=Timeframe.ONE_MINUTE,
+        start_time_ms=0,
+        end_time_ms=60_000,
+        limit=500,
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        adapter.fetch_historical_candles(request)
+
+    message = str(exc_info.value)
+    assert "/contract/public/kline" in message
+    assert "params=" in message
+    assert "http_status=200" in message
+    assert "response_body=" in message
+    assert "parsed_candle_count=0" in message
 
 
 def test_bitmart_retry_backoff_is_deterministic() -> None:

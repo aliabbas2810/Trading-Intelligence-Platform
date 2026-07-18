@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from time import sleep
+from time import sleep, time
 from typing import Callable, Protocol, cast
 from urllib.parse import urlencode
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from backend.exchange.models import (
@@ -44,9 +45,23 @@ class UrlLibJsonTransport:
 
     def get_json(self, path: str, params: dict[str, str | int]) -> object:
         query = urlencode(params)
-        request = Request(f"{self._base_url}{path}?{query}", headers={"Accept": "application/json"})
-        with urlopen(request, timeout=self._timeout_seconds) as response:
-            return json.loads(response.read().decode("utf-8"))
+        url = f"{self._base_url}{path}?{query}"
+        request = Request(
+            url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "Trading-Intelligence-Platform/0.3",
+            },
+        )
+        try:
+            with urlopen(request, timeout=self._timeout_seconds) as response:
+                body = response.read().decode("utf-8")
+                return json.loads(body)
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"BitMart HTTP request failed url={url} status={exc.code} body={truncate_text(body)}",
+            ) from exc
 
 
 class BitMartFuturesMarketDataAdapter:
@@ -64,7 +79,7 @@ class BitMartFuturesMarketDataAdapter:
         self._transport = transport or UrlLibJsonTransport()
         self._retry_policy = retry_policy or RetryPolicy()
         self._page_size = page_size
-        self._clock_ms = clock_ms or (lambda: 0)
+        self._clock_ms = clock_ms or (lambda: int(time() * 1000))
         self._sleeper = sleeper or sleep
         self._metadata: dict[str, ContractMetadata] = {}
 
@@ -123,31 +138,38 @@ class BitMartFuturesMarketDataAdapter:
     ) -> CandlePage:
         duration_ms = timeframe_duration_ms(request.timeframe)
         limit = min(request.limit, self._page_size)
-        payload = self._request(
-            "/contract/public/kline",
-            {
-                "symbol": self.exchange_symbol_for(request.symbol),
-                "step": 1,
-                "start_time": request.start_time_ms // 1000,
-                "end_time": request.end_time_ms // 1000,
-                "limit": limit,
-            },
-        )
-        rows = self._kline_rows(payload)
-        candles = tuple(
-            sorted(
-                (
-                    candle
-                    for candle in (
-                        self._candle_from_row(row, request.symbol, request.timeframe, duration_ms)
-                        for row in rows
-                    )
-                    if request.start_time_ms <= candle.open_time_ms < request.end_time_ms
-                    and candle.open_time_ms <= self.fetch_latest_completed_candle_time(request.symbol)
+        path = "/contract/public/kline"
+        params: dict[str, str | int] = {
+            "symbol": self.exchange_symbol_for(request.symbol),
+            "step": 1,
+            "start_time": request.start_time_ms // 1000,
+            "end_time": request.end_time_ms // 1000,
+            "limit": limit,
+        }
+        payload = self._request(path, params)
+        try:
+            rows = self._kline_rows(payload)
+            candles = tuple(
+                sorted(
+                    (
+                        candle
+                        for candle in (
+                            self._candle_from_row(row, request.symbol, request.timeframe, duration_ms)
+                            for row in rows
+                        )
+                        if request.start_time_ms <= candle.open_time_ms < request.end_time_ms
+                        and candle.open_time_ms <= self.fetch_latest_completed_candle_time(request.symbol)
+                    ),
+                    key=lambda item: item.open_time_ms,
                 ),
-                key=lambda item: item.open_time_ms,
-            ),
-        )
+            )
+        except Exception as exc:
+            raise ValueError(
+                "BitMart kline parsing failed "
+                f"path={path} params={params} http_status=200 "
+                f"response_body={truncate_text(json.dumps(payload, sort_keys=True, default=str))} "
+                "parsed_candle_count=0",
+            ) from exc
         if not candles or len(candles) < limit:
             return CandlePage(candles=candles, next_start_time_ms=None, complete=True)
         return CandlePage(
@@ -226,7 +248,11 @@ class BitMartFuturesMarketDataAdapter:
         if exchange_symbol is None:
             return None
         canonical = self.normalize_symbol(exchange_symbol)
-        base, quote = split_symbol(canonical)
+        split_base, split_quote = split_symbol(canonical)
+        base = self._read_optional_str(raw, "base_currency") or split_base
+        quote = self._read_optional_str(raw, "quote_currency") or split_quote
+        if not base or not quote:
+            return None
         contract_type = (self._read_optional_str(raw, "contract_type") or "").lower()
         product_type = (self._read_optional_str(raw, "product_type") or "").lower()
         status_text = (self._read_optional_str(raw, "status") or "").lower()
@@ -262,10 +288,10 @@ class BitMartFuturesMarketDataAdapter:
             timeframe=timeframe,
             open_time_ms=open_time_s * 1000,
             close_time_ms=open_time_s * 1000 + duration_ms,
-            open=self._read_required_float(row, "open", "o"),
-            high=self._read_required_float(row, "high", "h"),
-            low=self._read_required_float(row, "low", "l"),
-            close=self._read_required_float(row, "close", "c"),
+            open=self._read_required_float(row, "open", "open_price", "o"),
+            high=self._read_required_float(row, "high", "high_price", "h"),
+            low=self._read_required_float(row, "low", "low_price", "l"),
+            close=self._read_required_float(row, "close", "close_price", "c"),
             volume=self._read_required_float(row, "volume", "vol", "v"),
         )
 
@@ -325,3 +351,7 @@ def flatten_metadata(raw: dict[str, object]) -> dict[str, str | int | float | bo
         if value is None or isinstance(value, str | int | float | bool):
             flat[key] = value
     return flat
+
+
+def truncate_text(value: str, *, limit: int = 1000) -> str:
+    return value if len(value) <= limit else f"{value[:limit]}...<truncated>"

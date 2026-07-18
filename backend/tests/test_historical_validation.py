@@ -5,10 +5,16 @@ from pathlib import Path
 import pytest
 
 from backend.engines.historical import (
+    BitMartHistoricalCandleDownloader,
     HistoricalCandleFileStore,
     HistoricalCandleRequest,
 )
 from backend.engines.historical.loader import candle_from_bitmart_kline
+from backend.exchange import (
+    BitMartFuturesMarketDataAdapter,
+    ExchangeHistoricalCandleRequest,
+    HistoricalCandleResult,
+)
 from backend.engines.historical.validation import HistoricalValidationRunner
 from backend.models import Candle, Timeframe
 from scripts.validate_historical import main
@@ -56,6 +62,41 @@ def test_bitmart_kline_row_normalizes_to_canonical_candle() -> None:
         close=104.0,
         volume=12.5,
     )
+
+
+def test_bitmart_kline_row_accepts_real_price_field_names() -> None:
+    candle = candle_from_bitmart_kline(
+        {
+            "timestamp": 0,
+            "open_price": "100.0",
+            "high_price": "105.0",
+            "low_price": "99.0",
+            "close_price": "104.0",
+            "volume": "12.5",
+        },
+        symbol="BTCUSDT",
+        timeframe=Timeframe.ONE_MINUTE,
+        duration_ms=60_000,
+    )
+
+    assert candle.open == 100.0
+    assert candle.high == 105.0
+    assert candle.low == 99.0
+    assert candle.close == 104.0
+
+
+def test_bitmart_downloader_rejects_zero_candle_download() -> None:
+    downloader = BitMartHistoricalCandleDownloader(adapter=EmptyBitMartAdapter())
+
+    with pytest.raises(RuntimeError) as exc_info:
+        downloader.load(make_request())
+
+    message = str(exc_info.value)
+    assert "zero candles" in message
+    assert "/contract/public/kline" in message
+    assert "symbol=BTCUSDT" in message
+    assert "start_time=0" in message
+    assert "end_time=240" in message
 
 
 def test_historical_validation_runner_feeds_existing_runtime_paths() -> None:
@@ -153,3 +194,16 @@ def make_fixture_candles(*, count: int) -> tuple[Candle, ...]:
             ),
         )
     return tuple(candles)
+
+
+class EmptyBitMartAdapter(BitMartFuturesMarketDataAdapter):
+    def fetch_historical_candles(self, request: ExchangeHistoricalCandleRequest) -> HistoricalCandleResult:
+        return HistoricalCandleResult(
+            request=request,
+            candles=(),
+            pages=1,
+            latest_completed_time_ms=0,
+        )
+
+    def exchange_symbol_for(self, canonical_symbol: str) -> str:
+        return canonical_symbol
