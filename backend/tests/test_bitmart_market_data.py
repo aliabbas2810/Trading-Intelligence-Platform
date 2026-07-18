@@ -4,12 +4,15 @@ from backend.core import EventBus
 from backend.models import Trade
 from backend.pipelines.market_data import (
     BITMART_SOURCE,
+    BitMartTradeMessageParser,
     BitMartTradeStreamClient,
     BitMartTradeStreamClientConfig,
     EventBusMarketDataPipeline,
     MarketDataConnectionStatus,
     MarketDataStatusEvent,
     TradeReceivedEvent,
+    parse_bitmart_created_at_ms,
+    subscription_channel,
 )
 
 
@@ -51,3 +54,74 @@ def test_bitmart_live_stream_client_reports_unavailable_without_network() -> Non
     assert statuses[0].source == BITMART_SOURCE
     assert statuses[0].status is MarketDataConnectionStatus.ERROR
     assert statuses[0].message == "bitmart_live_stream_unavailable"
+
+
+def test_bitmart_trade_parser_uses_official_futures_trade_channel() -> None:
+    """Covers FR-101, FR-103, and TEST-001."""
+
+    parser = BitMartTradeMessageParser(symbol="BTCUSDT")
+
+    assert subscription_channel("BTCUSDT") == "futures/trade:BTCUSDT"
+    assert parser.subscribe_payload() == '{"action":"subscribe","args":["futures/trade:BTCUSDT"]}'
+
+
+def test_bitmart_trade_parser_normalizes_trade_timestamp() -> None:
+    """Covers FR-103 timestamp normalization and TEST-001."""
+
+    parser = BitMartTradeMessageParser(symbol="BTCUSDT")
+    trades = parser.parse(
+        """
+        {
+          "group":"futures/trade:BTCUSDT",
+          "data":[{
+            "trade_id":1409495322,
+            "symbol":"BTCUSDT",
+            "deal_price":"117387.58",
+            "deal_vol":"1445",
+            "m":true,
+            "created_at":"2023-02-24T07:54:11.124940968Z"
+          }]
+        }
+        """,
+    )
+
+    assert len(trades) == 1
+    assert trades[0].symbol == "BTCUSDT"
+    assert trades[0].price == 117_387.58
+    assert trades[0].quantity == 1445.0
+    assert trades[0].timestamp_ms == parse_bitmart_created_at_ms("2023-02-24T07:54:11.124940968Z")
+    assert trades[0].source == BITMART_SOURCE
+
+
+def test_bitmart_client_ack_malformed_and_duplicate_trade_handling() -> None:
+    """Covers subscription ack, malformed messages, duplicate suppression, and TEST-001."""
+
+    event_bus = EventBus()
+    trades: list[TradeReceivedEvent] = []
+    statuses: list[MarketDataStatusEvent] = []
+    event_bus.subscribe(TradeReceivedEvent, trades.append)
+    event_bus.subscribe(MarketDataStatusEvent, statuses.append)
+    client = BitMartTradeStreamClient(
+        config=BitMartTradeStreamClientConfig(symbol="BTCUSDT"),
+        event_bus=event_bus,
+        clock_ms=lambda: 123,
+    )
+    ack = (
+        '{"action":"subscribe","group":"futures/trade:BTCUSDT","success":true,'
+        '"request":{"action":"subscribe","args":["futures/trade:BTCUSDT"]}}'
+    )
+    message = (
+        '{"group":"futures/trade:BTCUSDT","data":[{"trade_id":1,"symbol":"BTCUSDT",'
+        '"deal_price":"100","deal_vol":"2","m":true,"created_at":"2023-02-24T07:54:11.124Z"}]}'
+    )
+
+    assert client.handle_text_message(ack) == ()
+    client.handle_text_message(message)
+    client.handle_text_message(message)
+    client.handle_text_message('{"group":"futures/trade:BTCUSDT","data":[null]}')
+
+    assert statuses[-1].status is MarketDataConnectionStatus.CONNECTED
+    assert len(trades) == 1
+    assert client.diagnostics.subscription_acknowledged is True
+    assert client.diagnostics.duplicate_trade_count == 1
+    assert client.diagnostics.malformed_trade_count == 1

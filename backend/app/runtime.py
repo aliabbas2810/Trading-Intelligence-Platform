@@ -73,6 +73,7 @@ from backend.pipelines.candle import CandleClosedEvent, OneMinuteCandlePipeline
 from backend.pipelines.market_data import (
     BitMartTradeStreamClient,
     BitMartTradeStreamClientConfig,
+    BitMartWebSocketLiveStreamRunner,
     EventBusMarketDataPipeline,
     MarketDataConnectionStatus,
     MarketDataStatusEvent,
@@ -177,7 +178,7 @@ class LiveStreamRunner(Protocol):
 
 
 class BitMartUnavailableLiveStreamRunner:
-    """Reports BitMart live stream status until WebSocket ingestion is implemented."""
+    """Legacy test runner that reports BitMart live stream unavailability."""
 
     def __init__(self, client: BitMartTradeStreamClient) -> None:
         self._client = client
@@ -235,7 +236,7 @@ class BackendRuntime:
             self._accept_trade_for_runtime,
         )
         self.bitmart_stream_client = self._build_bitmart_stream_client()
-        self._live_stream_runner_factory = live_stream_runner_factory or BitMartUnavailableLiveStreamRunner
+        self._live_stream_runner_factory = live_stream_runner_factory or BitMartWebSocketLiveStreamRunner
         self._live_stream_runner: LiveStreamRunner | None = None
         self._stream_status = MarketDataConnectionStatus.STOPPED
         self.candle_pipeline = OneMinuteCandlePipeline(self.event_bus, self.candle_store)

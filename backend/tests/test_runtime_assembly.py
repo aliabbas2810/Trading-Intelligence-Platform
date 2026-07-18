@@ -27,7 +27,12 @@ from backend.exchange import (
     MarketType,
 )
 from backend.models import Candle, Timeframe, Trade
-from backend.pipelines.market_data import BitMartTradeStreamClient, MarketDataConnectionStatus, TradeReceivedEvent
+from backend.pipelines.market_data import (
+    BitMartTradeStreamClient,
+    BitMartWebSocketLiveStreamRunner,
+    MarketDataConnectionStatus,
+    TradeReceivedEvent,
+)
 
 
 def make_trade(timestamp_ms: int, price: float) -> Trade:
@@ -287,24 +292,15 @@ def test_historical_live_does_not_add_duplicate_event_subscriptions(tmp_path: Pa
     assert len(runtime.event_bus._handlers[TradeReceivedEvent]) == 1  # noqa: SLF001
 
 
-def test_live_bitmart_mode_reports_unavailable_by_default() -> None:
-    """M31.1 exposes BitMart live mode honestly until WebSocket ingestion exists."""
+def test_live_bitmart_mode_uses_real_websocket_runner_by_default() -> None:
+    """M31.5 wires the official BitMart WebSocket runner without opening a network socket."""
 
     runtime = BackendRuntime(
         settings=live_enabled_settings(),
         mode=RuntimeMode.LIVE_BITMART,
     )
 
-    runtime.start()
-    components = {component.name: component for component in runtime.health().components}
-
-    assert runtime.health().mode is RuntimeMode.LIVE_BITMART
-    assert components["market_data_mode"].message == "live_bitmart"
-    assert components["exchange"].message == "bitmart"
-    assert components["market_type"].message == "usdt_m_perpetual"
-    assert components["stream_enabled"].message == "True"
-    assert components["stream_status"].message == MarketDataConnectionStatus.ERROR.value
-    assert components["bitmart_stream_client"].message == "bitmart_live_stream_unavailable"
+    assert runtime._live_stream_runner_factory is BitMartWebSocketLiveStreamRunner  # noqa: SLF001
 
 
 def test_live_bitmart_mode_stops_injected_stream_client() -> None:
