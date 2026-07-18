@@ -98,6 +98,57 @@ def test_visualization_api_returns_stored_market_structure() -> None:
     assert snapshot.breaks_of_structure == (bos,)
 
 
+def test_visualization_api_supports_bounded_structure_responses() -> None:
+    """Covers M31.3 visible-range and bounded structure API support."""
+
+    api, _, structure_store, _, _ = make_api()
+    for index, label in enumerate((StructureLabel.HH, StructureLabel.HL, StructureLabel.LH)):
+        structure_store.add_swing(
+            StructureSwing(
+                symbol="BTCUSDT",
+                timeframe=Timeframe.ONE_MINUTE,
+                kind=SwingKind.HIGH if label in {StructureLabel.HH, StructureLabel.LH} else SwingKind.LOW,
+                label=label,
+                level=100.0 + index,
+                candle_open_time_ms=index * 60_000,
+                candle_close_time_ms=(index + 1) * 60_000,
+            )
+        )
+
+    snapshot = api.get_market_structure("BTCUSDT", Timeframe.ONE_MINUTE, limit=2)
+
+    assert [swing.label for swing in snapshot.swings] == [StructureLabel.HL, StructureLabel.LH]
+
+
+def test_structure_store_deduplicates_exact_repeated_events_and_reports_diagnostics() -> None:
+    """Covers M31.3 duplicate diagnostics without output filtering."""
+
+    _, _, structure_store, _, _ = make_api()
+    swing = StructureSwing(
+        symbol="BTCUSDT",
+        timeframe=Timeframe.FOUR_HOUR,
+        kind=SwingKind.HIGH,
+        label=StructureLabel.HH,
+        level=120.0,
+        candle_open_time_ms=0,
+        candle_close_time_ms=60_000,
+    )
+    structure_store.add_swing(swing)
+    structure_store.add_swing(swing)
+
+    diagnostics = structure_store.diagnostics(
+        "BTCUSDT",
+        Timeframe.FOUR_HOUR,
+        candle_count=10,
+        density_anomaly_ratio=0.35,
+        bos_anomaly_ratio=0.75,
+    )
+
+    assert structure_store.list("BTCUSDT", Timeframe.FOUR_HOUR).swings == (swing,)
+    assert diagnostics.duplicate_structures == 1
+    assert diagnostics.confirmed_swings == 1
+
+
 def test_visualization_api_returns_stored_trend_and_alignment() -> None:
     """Covers FR-603 and TEST-001."""
 

@@ -52,6 +52,8 @@ import type {
 
 const TIMEFRAMES: Timeframe[] = ["1w", "1d", "4h", "2h", "1h", "30m", "15m", "5m", "1m"];
 const DEFAULT_SYMBOL = "BTCUSDT";
+const CHART_HISTORY_LIMIT = 1500;
+const STRUCTURE_HISTORY_LIMIT = 400;
 
 interface VisualizationData {
   candles: CandleDto[];
@@ -113,23 +115,34 @@ export function VisualizationApp() {
 
   useEffect(() => {
     let active = true;
+    const controller = new AbortController();
     async function load() {
       setLoading(true);
       setErrorMessage(null);
       try {
+        const startedAt = performance.now();
         const [candles, structure, trend, alignment, health, readiness, aoiRead, aoiGate] = await Promise.all([
-          fetchCandles(symbol, timeframe),
-          fetchMarketStructure(symbol, timeframe),
-          fetchTrendState(symbol, timeframe),
-          fetchMultiTimeframeAlignment(symbol),
+          fetchCandles(symbol, timeframe, { limit: CHART_HISTORY_LIMIT, signal: controller.signal }),
+          fetchMarketStructure(symbol, timeframe, { limit: STRUCTURE_HISTORY_LIMIT, signal: controller.signal }),
+          fetchTrendState(symbol, timeframe, { signal: controller.signal }),
+          fetchMultiTimeframeAlignment(symbol, { signal: controller.signal }),
           fetchHealthStatus(),
-          fetchDataReadiness(symbol),
-          fetchAois(symbol, aoiStateFilter),
-          fetchAoiLocation(symbol),
+          fetchDataReadiness(symbol, { signal: controller.signal }),
+          fetchAois(symbol, aoiStateFilter, { signal: controller.signal }),
+          fetchAoiLocation(symbol, { signal: controller.signal }),
         ]);
         if (!active) {
           return;
         }
+        performance.mark("tip-visualization-fetch-complete");
+        console.debug("TIP visualization fetch", {
+          symbol,
+          timeframe,
+          candles: candles.length,
+          swings: structure.swings.length,
+          bos: structure.breaks_of_structure.length,
+          elapsedMs: Math.round(performance.now() - startedAt),
+        });
         setData({
           candles,
           structure,
@@ -143,7 +156,7 @@ export function VisualizationApp() {
         });
         setLastRefreshTime(new Date().toLocaleTimeString());
       } catch (error) {
-        if (active) {
+        if (active && !(error instanceof DOMException && error.name === "AbortError")) {
           setErrorMessage(error instanceof Error ? error.message : "Unable to load backend data");
         }
       } finally {
@@ -155,6 +168,7 @@ export function VisualizationApp() {
     void load();
     return () => {
       active = false;
+      controller.abort();
     };
   }, [symbol, timeframe, aoiStateFilter, refreshKey]);
 
@@ -1007,6 +1021,7 @@ function ChartCanvas({
     if (series === null) {
       return;
     }
+    const startedAt = performance.now();
     series.setData(candles.map(toChartCandle));
     removeAllPriceLines(series);
     for (const swing of structure.swings) {
@@ -1048,6 +1063,13 @@ function ChartCanvas({
       });
     }
     chartRef.current?.timeScale().fitContent();
+    console.debug("TIP chart render", {
+      candles: candles.length,
+      swings: structure.swings.length,
+      bos: bos.length,
+      aois: aois.length,
+      elapsedMs: Math.round(performance.now() - startedAt),
+    });
   }, [candles, structure, bos, aois]);
 
   return (

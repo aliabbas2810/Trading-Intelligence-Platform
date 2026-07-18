@@ -76,3 +76,25 @@ class StructureEvent:
     def __post_init__(self) -> None:
         if self.swing is None and self.break_of_structure is None:
             raise ValueError("StructureEvent must contain a swing or break_of_structure")
+
+
+@dataclass(frozen=True, slots=True)
+class StructureDiagnostics:
+    """Lifecycle diagnostics for confirmed structure density and BOS safety."""
+
+    candidate_swings: int
+    provisional_swings: int
+    confirmed_swings: int
+    hh: int
+    hl: int
+    lh: int
+    ll: int
+    bos: int
+    duplicate_structures: int
+    duplicate_bos: int
+    alternation_violation_count: int
+    same_role_run_length: int
+    candle_count: int
+    structure_candle_ratio: float
+    bos_swing_ratio: float
+    structure_density_anomaly: bool

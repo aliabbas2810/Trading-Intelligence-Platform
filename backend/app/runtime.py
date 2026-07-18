@@ -51,6 +51,8 @@ from backend.engines.scoring import ScoringInput, SetupScore, SetupScoringEngine
 from backend.engines.structure import (
     BreakOfStructure,
     MarketStructureEngine,
+    PercentDisplacementThreshold,
+    StructureDiagnostics,
     StructureEvent,
     StructureLabel,
     StructureSwing,
@@ -1551,8 +1553,39 @@ class BackendRuntime:
             raise RuntimeError(f"Market structure is only owned by 1w, 1d, and 4h, not {candle.timeframe.value}")
         key = (candle.symbol, candle.timeframe)
         if key not in self._structure_engines:
-            self._structure_engines[key] = MarketStructureEngine()
+            self._structure_engines[key] = MarketStructureEngine(
+                bullish_displacement=PercentDisplacementThreshold(
+                    percent=self.settings.structure.effective_bullish_displacement_percent,
+                ),
+                bearish_displacement=PercentDisplacementThreshold(
+                    percent=self.settings.structure.effective_bearish_displacement_percent,
+                ),
+            )
         return self._structure_engines[key]
+
+    def market_structure_diagnostics(self, symbol: str, timeframe: Timeframe) -> StructureDiagnostics:
+        """Report confirmed-structure density without recalculating market structure."""
+
+        candles = self.candle_store.list(symbol, timeframe)
+        store_diagnostics = self.structure_store.diagnostics(
+            symbol,
+            timeframe,
+            candle_count=len(candles),
+            density_anomaly_ratio=self.settings.structure.density_anomaly_ratio,
+            bos_anomaly_ratio=self.settings.structure.bos_anomaly_ratio,
+        )
+        engine = self._structure_engines.get((symbol, timeframe))
+        if engine is None:
+            return store_diagnostics
+        engine_diagnostics = engine.diagnostics(
+            duplicate_structures=store_diagnostics.duplicate_structures,
+            duplicate_bos=store_diagnostics.duplicate_bos,
+            density_anomaly_ratio=self.settings.structure.density_anomaly_ratio,
+            bos_anomaly_ratio=self.settings.structure.bos_anomaly_ratio,
+        )
+        if engine_diagnostics.confirmed_swings == store_diagnostics.confirmed_swings:
+            return engine_diagnostics
+        return store_diagnostics
 
     def _trend_engine_for(self, event: StructureEvent) -> TrendEngine:
         symbol, timeframe = structure_event_identity(event)

@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -81,16 +81,40 @@ def create_app(runtime: BackendRuntime | None = None) -> FastAPI:
         return jsonable_encoder(runtime_from_request(request).health())
 
     @app.get("/api/candles")
-    def candles(request: Request, symbol: str, timeframe: Timeframe) -> object:
+    def candles(
+        request: Request,
+        symbol: str,
+        timeframe: Timeframe,
+        start_time_ms: int | None = None,
+        end_time_ms: int | None = None,
+        limit: int | None = None,
+    ) -> object:
         """Read stored candles through the visualization boundary for FR-601."""
 
+        _validate_bounded_read_request(start_time_ms=start_time_ms, end_time_ms=end_time_ms, limit=limit)
         api = runtime_from_request(request).visualization_api
-        return jsonable_encoder(api.get_candles(symbol, timeframe))
+        return jsonable_encoder(
+            api.get_candles(
+                symbol,
+                timeframe,
+                start_time_ms=start_time_ms,
+                end_time_ms=end_time_ms,
+                limit=limit,
+            )
+        )
 
     @app.get("/api/market-structure")
-    def market_structure(request: Request, symbol: str, timeframe: Timeframe) -> object:
+    def market_structure(
+        request: Request,
+        symbol: str,
+        timeframe: Timeframe,
+        start_time_ms: int | None = None,
+        end_time_ms: int | None = None,
+        limit: int | None = None,
+    ) -> object:
         """Read precomputed structure through the visualization boundary for FR-602/FR-604."""
 
+        _validate_bounded_read_request(start_time_ms=start_time_ms, end_time_ms=end_time_ms, limit=limit)
         snapshot = runtime_from_request(request).market_structure_snapshot(symbol, timeframe)
         return jsonable_encoder(_public_market_structure_response(snapshot))
 
@@ -99,6 +123,12 @@ def create_app(runtime: BackendRuntime | None = None) -> FastAPI:
         """Return only the authoritative Weekly/Daily/4H current market state."""
 
         return jsonable_encoder(runtime_from_request(request).market_state(symbol))
+
+    @app.get("/api/market-structure/diagnostics")
+    def market_structure_diagnostics(request: Request, symbol: str, timeframe: Timeframe) -> object:
+        """Expose structure lifecycle diagnostics for M31.3 acceptance analysis."""
+
+        return jsonable_encoder(runtime_from_request(request).market_structure_diagnostics(symbol, timeframe))
 
     @app.get("/api/trend-state")
     def trend_state(request: Request, symbol: str, timeframe: Timeframe) -> object:
@@ -431,3 +461,15 @@ def runtime_from_app(app: FastAPI) -> BackendRuntime:
     if not isinstance(runtime, BackendRuntime):
         raise RuntimeError("FastAPI app state does not contain BackendRuntime")
     return runtime
+
+
+def _validate_bounded_read_request(
+    *,
+    start_time_ms: int | None,
+    end_time_ms: int | None,
+    limit: int | None,
+) -> None:
+    if start_time_ms is not None and end_time_ms is not None and end_time_ms <= start_time_ms:
+        raise HTTPException(status_code=422, detail="end_time_ms must be greater than start_time_ms")
+    if limit is not None and limit <= 0:
+        raise HTTPException(status_code=422, detail="limit must be greater than zero")

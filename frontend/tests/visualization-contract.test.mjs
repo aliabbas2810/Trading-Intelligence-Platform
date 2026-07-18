@@ -31,13 +31,21 @@ test("frontend fetches backend read endpoints", () => {
   assert.match(apiSource, /URLSearchParams/);
 });
 
+test("frontend uses bounded cancellable visualization requests", () => {
+  assert.match(apiSource, /AbortSignal/);
+  assert.match(apiSource, /limit: options\.limit/);
+  assert.match(appSource, /AbortController/);
+  assert.match(appSource, /CHART_HISTORY_LIMIT/);
+  assert.match(appSource, /STRUCTURE_HISTORY_LIMIT/);
+});
+
 test("frontend fetches and renders backend AOI overlays", () => {
   assert.match(apiSource, /fetchAois/);
   assert.match(apiSource, /fetchAoiLocation/);
   assert.match(typeSource, /AoiReadDto/);
   assert.match(typeSource, /AoiGateDto/);
-  assert.match(appSource, /fetchAois\(symbol, aoiStateFilter\)/);
-  assert.match(appSource, /fetchAoiLocation\(symbol\)/);
+  assert.match(appSource, /fetchAois\(symbol, aoiStateFilter,/);
+  assert.match(appSource, /fetchAoiLocation\(symbol,/);
   assert.match(appSource, /AoiOverlay/);
   assert.match(appSource, /WEEKLY AOI/);
   assert.match(appSource, /DAILY AOI/);
@@ -327,7 +335,7 @@ test("BOS overlays support visibility and permanent or auto-clean modes", () => 
 });
 
 test("trend background and ribbon are controlled by backend trend data", () => {
-  assert.match(appSource, /fetchTrendState\(symbol, timeframe\)/);
+  assert.match(appSource, /fetchTrendState\(symbol, timeframe,/);
   assert.match(appSource, /trendBackground \? trendState : "none"/);
   assert.match(appSource, /setTrendBackground/);
   assert.match(appSource, /trendRibbon \?/);
@@ -341,7 +349,7 @@ test("timeframe selector changes rendered backend data", () => {
   assert.match(typeSource, /"1w" \| "1d" \| "4h" \| "2h" \| "1h" \| "30m" \| "15m" \| "5m" \| "1m"/);
   assert.match(appSource, /\["1w", "1d", "4h", "2h", "1h", "30m", "15m", "5m", "1m"\]/);
   assert.match(appSource, /setTimeframe/);
-  assert.match(appSource, /fetchCandles\(symbol, timeframe\)/);
-  assert.match(appSource, /fetchMarketStructure\(symbol, timeframe\)/);
+  assert.match(appSource, /fetchCandles\(symbol, timeframe,/);
+  assert.match(appSource, /fetchMarketStructure\(symbol, timeframe,/);
   assert.match(appSource, /\[symbol, timeframe, refreshKey\]/);
 });

@@ -25,6 +25,14 @@ candles:
     - 1w
   timezone: UTC
 
+structure:
+  displacement_mode: percent
+  displacement_percent: 0.02
+  bullish_displacement_percent:
+  bearish_displacement_percent:
+  density_anomaly_ratio: 0.35
+  bos_anomaly_ratio: 0.75
+
 storage:
   candle_path: data/candles
   format: parquet

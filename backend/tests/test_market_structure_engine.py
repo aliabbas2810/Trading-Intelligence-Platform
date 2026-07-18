@@ -74,6 +74,27 @@ def test_percent_displacement_threshold_is_dynamic() -> None:
     assert DisplacementMode.PERCENT.value == "percent"
 
 
+def test_asymmetric_displacement_thresholds_are_supported() -> None:
+    """Covers CFG-003-style bullish/bearish percentage threshold compatibility."""
+
+    engine = MarketStructureEngine(
+        bullish_displacement=PercentDisplacementThreshold(percent=0.10),
+        bearish_displacement=PercentDisplacementThreshold(percent=0.05),
+    )
+    candles = [
+        make_candle(0, 100.0, 100.0),
+        make_candle(1, 120.0, 120.0),
+        make_candle(2, 111.0, 111.0),
+        make_candle(3, 108.0, 108.0),
+    ]
+
+    events = tuple(event for candle in candles for event in engine.add_candle(candle))
+
+    assert len(events) == 1
+    assert events[0].swing is not None
+    assert events[0].swing.level == 120.0
+
+
 def test_atr_and_hybrid_thresholds_are_typed_placeholders() -> None:
     """Covers FR-403 and TEST-001 placeholder interfaces."""
 
@@ -147,6 +168,69 @@ def test_detection_does_not_depend_on_exactly_three_candles() -> None:
     assert events[0].swing is not None
     assert events[0].swing.level == 125.0
     assert events[0].swing.candle_open_time_ms == 3 * MINUTE_MS
+
+
+def test_runtime_default_displacement_does_not_confirm_every_candle() -> None:
+    """Regression for M31.3: provisional highs move until an opposite pullback confirms once."""
+
+    engine = MarketStructureEngine()
+    candles = [
+        make_candle(index, 100.0 + index, 100.0 + index)
+        for index in range(20)
+    ]
+
+    events = tuple(event for candle in candles for event in engine.add_candle(candle))
+    diagnostics = engine.diagnostics()
+
+    assert events == ()
+    assert diagnostics.candidate_swings > 0
+    assert diagnostics.confirmed_swings == 0
+    assert diagnostics.structure_density_anomaly is False
+
+
+def test_single_confirmed_swing_after_provisional_extreme_pullback() -> None:
+    """Regression for M31.3: one moving provisional high becomes one confirmed HH."""
+
+    engine = MarketStructureEngine(displacement=PercentDisplacementThreshold(percent=0.05))
+    candles = [
+        make_candle(0, 100.0, 100.0),
+        make_candle(1, 110.0, 110.0),
+        make_candle(2, 120.0, 120.0),
+        make_candle(3, 130.0, 130.0),
+        make_candle(4, 123.0, 123.0),
+    ]
+
+    events = tuple(event for candle in candles for event in engine.add_candle(candle))
+    swings = [event.swing for event in events if event.swing is not None]
+
+    assert len(swings) == 1
+    assert swings[0].label is StructureLabel.HH
+    assert swings[0].level == 130.0
+
+
+def test_new_candidate_extreme_is_not_confirmed_by_same_candle_body() -> None:
+    """Regression: confirmation requires an opposite move after the provisional update."""
+
+    engine = MarketStructureEngine(displacement=PercentDisplacementThreshold(percent=0.05))
+    candles = [
+        make_candle(0, 120.0, 120.0),
+        make_candle(1, 100.0, 100.0),
+        make_candle(2, 130.0, 130.0),
+        make_candle(3, 90.0, 140.0),
+    ]
+
+    for candle in candles[:-1]:
+        tuple(engine.add_candle(candle))
+    events = tuple(engine.add_candle(candles[-1]))
+
+    assert [event.swing for event in events if event.swing is not None] == []
+
+    confirmation = tuple(engine.add_candle(make_candle(4, 115.0, 115.0)))
+    swings = [event.swing for event in confirmation if event.swing is not None]
+
+    assert len(swings) == 1
+    assert swings[0].kind is SwingKind.HIGH
+    assert swings[0].level == 140.0
 
 
 def test_elbow_swing_detection_uses_bodies_and_ignores_wicks() -> None:

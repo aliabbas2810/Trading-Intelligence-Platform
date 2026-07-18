@@ -17,8 +17,12 @@ import type {
 } from "./types";
 import { API_BASE_URL } from "./config";
 
-async function getJson<T>(path: string): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}/api${path}`);
+interface RequestOptions {
+  signal?: AbortSignal;
+}
+
+async function getJson<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}/api${path}`, { signal: options.signal });
   if (!response.ok) {
     throw new Error(`Request failed: ${response.status}`);
   }
@@ -37,39 +41,64 @@ async function postJson<T>(path: string, payload?: object): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-function query(params: Record<string, string>): string {
-  return new URLSearchParams(params).toString();
+function query(params: Record<string, string | number | undefined>): string {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined) {
+      search.set(key, String(value));
+    }
+  }
+  return search.toString();
 }
 
-export function fetchCandles(symbol: string, timeframe: Timeframe): Promise<CandleDto[]> {
-  return getJson<CandleDto[]>(`/candles?${query({ symbol, timeframe })}`);
+export function fetchCandles(
+  symbol: string,
+  timeframe: Timeframe,
+  options: RequestOptions & { limit?: number } = {},
+): Promise<CandleDto[]> {
+  return getJson<CandleDto[]>(`/candles?${query({ symbol, timeframe, limit: options.limit })}`, options);
 }
 
 export function fetchMarketStructure(
   symbol: string,
   timeframe: Timeframe,
+  options: RequestOptions & { limit?: number } = {},
 ): Promise<StructureSnapshotDto> {
-  return getJson<StructureSnapshotDto>(`/market-structure?${query({ symbol, timeframe })}`);
+  return getJson<StructureSnapshotDto>(
+    `/market-structure?${query({ symbol, timeframe, limit: options.limit })}`,
+    options,
+  );
 }
 
-export function fetchTrendState(symbol: string, timeframe: Timeframe): Promise<TrendSnapshotDto> {
-  return getJson<TrendSnapshotDto>(`/trend-state?${query({ symbol, timeframe })}`);
+export function fetchTrendState(
+  symbol: string,
+  timeframe: Timeframe,
+  options: RequestOptions = {},
+): Promise<TrendSnapshotDto> {
+  return getJson<TrendSnapshotDto>(`/trend-state?${query({ symbol, timeframe })}`, options);
 }
 
-export function fetchMultiTimeframeAlignment(symbol: string): Promise<MultiTimeframeAlignmentDto> {
-  return getJson<MultiTimeframeAlignmentDto>(`/multi-timeframe-alignment?${query({ symbol })}`);
+export function fetchMultiTimeframeAlignment(
+  symbol: string,
+  options: RequestOptions = {},
+): Promise<MultiTimeframeAlignmentDto> {
+  return getJson<MultiTimeframeAlignmentDto>(`/multi-timeframe-alignment?${query({ symbol })}`, options);
 }
 
-export function fetchDataReadiness(symbol: string): Promise<AnalysisReadinessDto> {
-  return getJson<AnalysisReadinessDto>(`/data-readiness?${query({ symbol })}`);
+export function fetchDataReadiness(symbol: string, options: RequestOptions = {}): Promise<AnalysisReadinessDto> {
+  return getJson<AnalysisReadinessDto>(`/data-readiness?${query({ symbol })}`, options);
 }
 
-export function fetchAois(symbol: string, stateFilter: AoiStateFilter): Promise<AoiReadDto> {
-  return getJson<AoiReadDto>(`/aois?${query({ symbol, state_filter: stateFilter })}`);
+export function fetchAois(
+  symbol: string,
+  stateFilter: AoiStateFilter,
+  options: RequestOptions = {},
+): Promise<AoiReadDto> {
+  return getJson<AoiReadDto>(`/aois?${query({ symbol, state_filter: stateFilter })}`, options);
 }
 
-export function fetchAoiLocation(symbol: string): Promise<AoiGateDto> {
-  return getJson<AoiGateDto>(`/aoi-location?${query({ symbol })}`);
+export function fetchAoiLocation(symbol: string, options: RequestOptions = {}): Promise<AoiGateDto> {
+  return getJson<AoiGateDto>(`/aoi-location?${query({ symbol })}`, options);
 }
 
 export function fetchHealthStatus(): Promise<HealthStatusDto> {

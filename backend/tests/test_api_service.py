@@ -127,6 +127,30 @@ def test_candles_endpoint_returns_stored_candles() -> None:
     ]
 
 
+def test_bounded_visualization_endpoints_reject_invalid_ranges_and_limits() -> None:
+    """Covers FR-601, FR-602, and TEST-001 bounded read validation."""
+
+    runtime = BackendRuntime(settings=demo_disabled_settings(), mode=RuntimeMode.DRY_RUN)
+
+    with TestClient(create_app(runtime)) as client:
+        candles_range_response = client.get(
+            "/api/candles",
+            params={"symbol": "BTCUSDT", "timeframe": "4h", "start_time_ms": 2, "end_time_ms": 1},
+        )
+        structure_range_response = client.get(
+            "/api/market-structure",
+            params={"symbol": "BTCUSDT", "timeframe": "4h", "start_time_ms": 2, "end_time_ms": 1},
+        )
+        candles_limit_response = client.get(
+            "/api/candles",
+            params={"symbol": "BTCUSDT", "timeframe": "4h", "limit": 0},
+        )
+
+    assert candles_range_response.status_code == 422
+    assert structure_range_response.status_code == 422
+    assert candles_limit_response.status_code == 422
+
+
 def test_structure_trend_and_alignment_endpoints_use_read_boundaries() -> None:
     """Covers FR-602, FR-603, FR-604, FR-605, and TEST-001."""
 

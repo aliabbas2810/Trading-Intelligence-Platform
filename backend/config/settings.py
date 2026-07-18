@@ -39,6 +39,25 @@ class CandleSettings(BaseModel):
     timezone: str
 
 
+class StructureSettings(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    displacement_mode: Literal["percent", "atr", "hybrid"] = "percent"
+    displacement_percent: float = Field(default=0.02, gt=0)
+    bullish_displacement_percent: float | None = Field(default=None, gt=0)
+    bearish_displacement_percent: float | None = Field(default=None, gt=0)
+    density_anomaly_ratio: float = Field(default=0.35, gt=0, le=1)
+    bos_anomaly_ratio: float = Field(default=0.75, gt=0)
+
+    @property
+    def effective_bullish_displacement_percent(self) -> float:
+        return self.bullish_displacement_percent or self.displacement_percent
+
+    @property
+    def effective_bearish_displacement_percent(self) -> float:
+        return self.bearish_displacement_percent or self.displacement_percent
+
+
 class StorageSettings(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -94,6 +113,7 @@ class PlatformSettings(BaseModel):
     app: AppSettings
     market_data: MarketDataSettings
     candles: CandleSettings
+    structure: StructureSettings = Field(default_factory=StructureSettings)
     storage: StorageSettings
     logging: LoggingSettings
     demo: DemoSettings = Field(default_factory=DemoSettings)
