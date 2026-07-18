@@ -1,5 +1,6 @@
 from backend.config.settings import (
     AppSettings,
+    ApiSettings,
     CandleSettings,
     LoggingSettings,
     MarketDataSettings,
@@ -10,6 +11,7 @@ from backend.config.settings import (
 
 __all__ = [
     "AppSettings",
+    "ApiSettings",
     "CandleSettings",
     "LoggingSettings",
     "MarketDataSettings",

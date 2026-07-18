@@ -14,6 +14,8 @@ def test_load_default_settings_validates_typed_config() -> None:
     settings = load_settings()
 
     assert settings.app.name == "trading-intelligence-platform"
+    assert settings.api.cors_allowed_origins == ("http://127.0.0.1:5173", "http://localhost:5173")
+    assert not settings.api.cors_allow_credentials
     assert settings.market_data.exchange == "bitmart"
     assert settings.market_data.market_type == "usdt_m_perpetual"
     assert settings.market_data.symbols == ("BTCUSDT",)

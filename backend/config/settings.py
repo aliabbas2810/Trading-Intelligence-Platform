@@ -19,6 +19,16 @@ class AppSettings(BaseModel):
     environment: str
 
 
+class ApiSettings(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    cors_allowed_origins: tuple[str, ...] = (
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+    )
+    cors_allow_credentials: bool = False
+
+
 class MarketDataSettings(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -121,6 +131,7 @@ class PlatformSettings(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     app: AppSettings
+    api: ApiSettings = Field(default_factory=ApiSettings)
     market_data: MarketDataSettings
     candles: CandleSettings
     structure: StructureSettings = Field(default_factory=StructureSettings)

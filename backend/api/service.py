@@ -35,10 +35,6 @@ from backend.engines.aoi import AoiTimeframe
 from backend.models import Timeframe
 
 
-LOCAL_FRONTEND_ORIGINS = (
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-)
 LOGGER = logging.getLogger(__name__)
 SHUTDOWN_TASK_WAIT_DIAGNOSTIC_SECONDS = 5.0
 
@@ -143,13 +139,7 @@ def create_app(runtime: BackendRuntime | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.runtime = api_runtime
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=list(LOCAL_FRONTEND_ORIGINS),
-        allow_credentials=False,
-        allow_methods=["GET", "POST"],
-        allow_headers=["*"],
-    )
+    _configure_cors(app, api_runtime)
 
     @app.get("/health")
     def health(request: Request) -> object:
@@ -523,6 +513,22 @@ def create_app(runtime: BackendRuntime | None = None) -> FastAPI:
         return TradingIntelligenceResponse.from_result(result)
 
     return app
+
+
+def _configure_cors(app: FastAPI, runtime: BackendRuntime) -> None:
+    """Configure browser API access for local frontend development."""
+
+    allowed_origins = tuple(runtime.settings.api.cors_allowed_origins)
+    if not allowed_origins:
+        return
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(allowed_origins),
+        allow_credentials=runtime.settings.api.cors_allow_credentials,
+        allow_methods=["GET", "POST"],
+        allow_headers=["*"],
+    )
 
 
 def runtime_from_request(request: Request) -> BackendRuntime:

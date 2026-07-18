@@ -89,6 +89,60 @@ def test_app_factory_creates_fastapi_app() -> None:
     assert app.title == "Trading Intelligence Platform API"
 
 
+def test_cors_preflight_accepts_127_frontend_origin() -> None:
+    """Covers RUNTIME-002 and TEST-001 local browser integration."""
+
+    runtime = BackendRuntime(mode=RuntimeMode.DRY_RUN)
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.options(
+            "/api/data-readiness?symbol=BTCUSDT",
+            headers={
+                "Origin": "http://127.0.0.1:5173",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:5173"
+
+
+def test_cors_api_response_includes_allowed_origin() -> None:
+    """Covers RUNTIME-002 and TEST-001 for normal API responses."""
+
+    runtime = BackendRuntime(mode=RuntimeMode.DRY_RUN)
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.get("/api/health", headers={"Origin": "http://127.0.0.1:5173"})
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:5173"
+
+
+def test_cors_accepts_localhost_frontend_origin() -> None:
+    """Covers RUNTIME-002 and TEST-001 for both local dev hostnames."""
+
+    runtime = BackendRuntime(mode=RuntimeMode.DRY_RUN)
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.get("/api/health", headers={"Origin": "http://localhost:5173"})
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+
+
+def test_cors_rejects_unapproved_origin_header() -> None:
+    """Covers RUNTIME-002 and TEST-001 by keeping CORS origins explicit."""
+
+    runtime = BackendRuntime(mode=RuntimeMode.DRY_RUN)
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.get("/api/health", headers={"Origin": "http://example.invalid"})
+
+    assert response.status_code == 200
+    assert "access-control-allow-origin" not in response.headers
+
+
 def test_health_endpoint_returns_runtime_status() -> None:
     """Covers RUNTIME-003, RUNTIME-004, and TEST-001."""
 
