@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
 import backend.app.runtime as runtime_module
 from backend.app import (
@@ -14,8 +17,10 @@ from backend.app import (
     RuntimeState,
 )
 from backend.app.cli import main
+from backend.api.service import create_app
 from backend.config import PlatformSettings, load_settings
 from backend.engines.historical import HistoricalCandleFileStore, HistoricalCandleLoadResult, HistoricalCandleRequest
+from backend.engines.historical.loader import inferred_integrity_report
 from backend.exchange import (
     ExchangeHistoricalCandleRequest,
     ExchangeName,
@@ -27,12 +32,7 @@ from backend.exchange import (
     MarketType,
 )
 from backend.models import Candle, Timeframe, Trade
-from backend.pipelines.market_data import (
-    BitMartTradeStreamClient,
-    BitMartWebSocketLiveStreamRunner,
-    MarketDataConnectionStatus,
-    TradeReceivedEvent,
-)
+from backend.pipelines.market_data import BitMartTradeStreamClient, MarketDataConnectionStatus, TradeReceivedEvent
 
 
 def make_trade(timestamp_ms: int, price: float) -> Trade:
@@ -289,28 +289,46 @@ def test_historical_live_does_not_add_duplicate_event_subscriptions(tmp_path: Pa
 
     runtime.start()
 
-    assert len(runtime.event_bus._handlers[TradeReceivedEvent]) == 1  # noqa: SLF001
+    assert len(runtime.event_bus._handlers[TradeReceivedEvent]) == 2  # noqa: SLF001
 
 
-def test_live_bitmart_mode_uses_real_websocket_runner_by_default() -> None:
-    """M31.5 wires the official BitMart WebSocket runner without opening a network socket."""
+def test_live_bitmart_mode_uses_real_websocket_runner_by_default(tmp_path: Path) -> None:
+    """M31.5 wires the real BitMart WebSocket runner by default."""
 
     runtime = BackendRuntime(
-        settings=live_enabled_settings(),
+        settings=live_enabled_settings(data_root=tmp_path, historical_integrity_policy=HistoricalIntegrityPolicy.WARN),
         mode=RuntimeMode.LIVE_BITMART,
+        live_stream_runner_factory=lambda client: RecordingLiveStreamRunner().bind(client),
+        historical_downloader=FakeLiveCatchupDownloader(latest_completed_open_time_ms=0),
     )
 
-    assert runtime._live_stream_runner_factory is BitMartWebSocketLiveStreamRunner  # noqa: SLF001
+    runtime.start()
+    components = {component.name: component for component in runtime.health().components}
+
+    assert runtime.health().mode is RuntimeMode.LIVE_BITMART
+    assert components["market_data_mode"].message == "live_bitmart"
+    assert components["exchange"].message == "bitmart"
+    assert components["market_type"].message == "usdt_m_perpetual"
+    assert components["stream_enabled"].message == "True"
+    assert components["stream_status"].message == MarketDataConnectionStatus.STOPPED.value
+    assert components["bitmart_stream_client"].message == "bitmart:usdt_m_perpetual:BTCUSDT"
+    assert components["websocket_endpoint"].message.startswith("wss://openapi-ws")
+    assert components["subscription_channel"].message == "futures/trade:BTCUSDT"
+    assert components["sync_loaded_count"].message == "1"
 
 
-def test_live_bitmart_mode_stops_injected_stream_client() -> None:
+def test_live_bitmart_mode_stops_injected_stream_client(tmp_path: Path) -> None:
     """Covers FR-102 lifecycle stop handling and RUNTIME-003."""
 
     runner = RecordingLiveStreamRunner()
     runtime = BackendRuntime(
-        settings=live_enabled_settings(),
+        settings=live_enabled_settings(
+            data_root=tmp_path,
+            historical_integrity_policy=HistoricalIntegrityPolicy.WARN,
+        ),
         mode=RuntimeMode.LIVE_BITMART,
         live_stream_runner_factory=lambda client: runner.bind(client),
+        historical_downloader=FakeLiveCatchupDownloader(latest_completed_open_time_ms=0),
     )
     runtime.start()
 
@@ -319,34 +337,94 @@ def test_live_bitmart_mode_stops_injected_stream_client() -> None:
     assert runner.stopped
 
 
-def test_live_bitmart_injected_trade_event_reaches_candle_pipeline() -> None:
+def test_live_bitmart_injected_trade_event_reaches_candle_pipeline(tmp_path: Path) -> None:
     """Covers FR-109 and RUNTIME-002 without real BitMart network calls."""
 
-    runner = RecordingLiveStreamRunner(messages=(make_trade(1_000, 100.0),))
+    runner = RecordingLiveStreamRunner(messages=(make_trade(61_000, 100.0),))
     runtime = BackendRuntime(
-        settings=live_enabled_settings(),
+        settings=live_enabled_settings(data_root=tmp_path),
         mode=RuntimeMode.LIVE_BITMART,
         live_stream_runner_factory=lambda client: runner.bind(client),
+        historical_downloader=FakeLiveCatchupDownloader(latest_completed_open_time_ms=0),
     )
 
     runtime.start()
     assert runner.client is not None
-    runner.client.publish_trade(make_trade(61_000, 101.0))
+    runner.client.publish_trade(make_trade(121_000, 101.0))
 
     candles = runtime.visualization_api.get_candles("BTCUSDT", Timeframe.ONE_MINUTE)
-    assert len(candles) == 1
-    assert candles[0].open == 100.0
-    assert candles[0].close == 100.0
+    assert len(candles) == 2
+    assert candles[-1].open_time_ms == 60_000
+    assert candles[-1].open == 100.0
+    assert candles[-1].close == 100.0
 
 
-def test_live_bitmart_health_reports_stream_fields() -> None:
+def test_live_bitmart_buffers_and_hands_off_current_minute_trades(tmp_path: Path) -> None:
+    """Covers race-safe REST/WebSocket handoff without duplicate finalized candles."""
+
+    runner = RecordingLiveStreamRunner(
+        messages=(
+            make_trade(60_000, 90.0),
+            make_trade(180_000, 101.0),
+        ),
+    )
+    runtime = BackendRuntime(
+        settings=live_enabled_settings(
+            data_root=tmp_path,
+            historical_integrity_policy=HistoricalIntegrityPolicy.WARN,
+        ),
+        mode=RuntimeMode.LIVE_BITMART,
+        live_stream_runner_factory=lambda client: runner.bind(client),
+        historical_downloader=FakeLiveCatchupDownloader(latest_completed_open_time_ms=120_000),
+    )
+
+    runtime.start()
+    assert runner.client is not None
+    runner.client.publish_trade(make_trade(240_000, 102.0))
+
+    candles = runtime.visualization_api.get_candles("BTCUSDT", Timeframe.ONE_MINUTE)
+    assert [candle.open_time_ms for candle in candles] == [0, 60_000, 120_000, 180_000]
+    assert candles[-1].open == 101.0
+    assert candles[-1].close == 101.0
+
+
+def test_live_bitmart_persists_finalized_live_candle_as_segment(tmp_path: Path) -> None:
+    """Covers append-friendly live 1m persistence and restart-compatible discovery."""
+
+    runner = RecordingLiveStreamRunner(messages=(make_trade(60_000, 100.0),))
+    runtime = BackendRuntime(
+        settings=live_enabled_settings(data_root=tmp_path),
+        mode=RuntimeMode.LIVE_BITMART,
+        live_stream_runner_factory=lambda client: runner.bind(client),
+        historical_downloader=FakeLiveCatchupDownloader(latest_completed_open_time_ms=0),
+    )
+
+    runtime.start()
+    assert runner.client is not None
+    runner.client.publish_trade(make_trade(120_000, 101.0))
+
+    segment = (
+        tmp_path
+        / "bitmart"
+        / "usdt_m_perpetual"
+        / "BTCUSDT"
+        / "1m"
+        / "0_86400000.jsonl"
+    )
+    components = {component.name: component for component in runtime.health().components}
+    assert segment.exists()
+    assert components["last_persisted_candle_open_time_ms"].message == "60000"
+
+
+def test_live_bitmart_health_reports_stream_fields(tmp_path: Path) -> None:
     """Covers RUNTIME-004 live market data health fields."""
 
     runner = RecordingLiveStreamRunner()
     runtime = BackendRuntime(
-        settings=live_enabled_settings(symbol="ETHUSDT"),
+        settings=live_enabled_settings(symbol="ETHUSDT", data_root=tmp_path),
         mode=RuntimeMode.LIVE_BITMART,
         live_stream_runner_factory=lambda client: runner.bind(client),
+        historical_downloader=FakeLiveCatchupDownloader(symbol="ETHUSDT", latest_completed_open_time_ms=0),
     )
 
     runtime.start()
@@ -360,6 +438,356 @@ def test_live_bitmart_health_reports_stream_fields() -> None:
     assert components["exchange"].message == "bitmart"
     assert components["market_type"].message == "usdt_m_perpetual"
     assert components["bitmart_stream_client"].status is ComponentStatus.RUNNING
+
+
+def test_live_startup_discovers_cache_and_fetches_only_missing_closed_candles(tmp_path: Path) -> None:
+    cached_request = HistoricalCandleRequest(
+        symbol="BTCUSDT",
+        timeframe=Timeframe.ONE_MINUTE,
+        start_time_ms=0,
+        end_time_ms=120_000,
+    )
+    HistoricalCandleFileStore(tmp_path).save(cached_request, historical_fixture_candles(count=2))
+    runner = RecordingLiveStreamRunner()
+    downloader = FakeLiveCatchupDownloader(latest_completed_open_time_ms=240_000)
+
+    runtime = BackendRuntime(
+        settings=live_enabled_settings(data_root=tmp_path),
+        mode=RuntimeMode.LIVE_BITMART,
+        live_stream_runner_factory=lambda client: runner.bind(client),
+        historical_downloader=downloader,
+    )
+
+    runtime.start()
+    components = {component.name: component for component in runtime.health().components}
+    candles = runtime.visualization_api.get_candles("BTCUSDT", Timeframe.ONE_MINUTE)
+
+    assert downloader.requests == [(120_000, 300_000)]
+    assert len(candles) == 5
+    assert components["cache_candle_count"].message == "5"
+    assert components["cache_last_open_time_ms"].message == "240000"
+    assert components["sync_requested_count"].message == "3"
+    assert components["sync_loaded_count"].message == "3"
+    assert components["sync_inserted_count"].message == "3"
+    assert components["sync_deduplicated_count"].message == "0"
+    assert runner.started
+
+
+def test_live_startup_with_current_cache_does_not_request_rest_catchup(tmp_path: Path) -> None:
+    cached_request = HistoricalCandleRequest(
+        symbol="BTCUSDT",
+        timeframe=Timeframe.ONE_MINUTE,
+        start_time_ms=0,
+        end_time_ms=300_000,
+    )
+    HistoricalCandleFileStore(tmp_path).save(cached_request, historical_fixture_candles(count=5))
+    downloader = FakeLiveCatchupDownloader(latest_completed_open_time_ms=240_000)
+
+    runtime = BackendRuntime(
+        settings=live_enabled_settings(data_root=tmp_path),
+        mode=RuntimeMode.LIVE_BITMART,
+        live_stream_runner_factory=lambda client: RecordingLiveStreamRunner().bind(client),
+        historical_downloader=downloader,
+    )
+
+    runtime.start()
+    components = {component.name: component for component in runtime.health().components}
+
+    assert downloader.requests == []
+    assert components["sync_requested_count"].message == "0"
+    assert components["sync_loaded_count"].message == "0"
+    assert components["cache_candle_count"].message == "5"
+
+
+def test_live_startup_strict_mode_can_repair_incomplete_cached_segment(tmp_path: Path) -> None:
+    cached_request = HistoricalCandleRequest(
+        symbol="BTCUSDT",
+        timeframe=Timeframe.ONE_MINUTE,
+        start_time_ms=0,
+        end_time_ms=300_000,
+    )
+    incomplete_report = HistoricalIntegrityReport(
+        exchange=ExchangeName.BITMART,
+        market_type=MarketType.USDT_M_PERPETUAL,
+        symbol="BTCUSDT",
+        timeframe=Timeframe.ONE_MINUTE,
+        start_time_ms=0,
+        end_time_ms=300_000,
+        requested_candle_count=5,
+        loaded_candle_count=2,
+        gap_count=1,
+        total_missing_candles=3,
+        gaps=(),
+        status=HistoricalIntegrityStatus.INCOMPLETE,
+        policy=HistoricalIntegrityPolicy.STRICT,
+        complete=False,
+    )
+    HistoricalCandleFileStore(tmp_path).save_result(
+        cached_request,
+        HistoricalCandleLoadResult(candles=historical_fixture_candles(count=2), integrity_report=incomplete_report),
+    )
+    downloader = FakeLiveCatchupDownloader(latest_completed_open_time_ms=240_000)
+
+    runtime = BackendRuntime(
+        settings=live_enabled_settings(data_root=tmp_path),
+        mode=RuntimeMode.LIVE_BITMART,
+        live_stream_runner_factory=lambda client: RecordingLiveStreamRunner().bind(client),
+        historical_downloader=downloader,
+    )
+
+    runtime.start()
+
+    assert downloader.requests == [(120_000, 300_000)]
+    assert len(runtime.visualization_api.get_candles("BTCUSDT", Timeframe.ONE_MINUTE)) == 5
+
+
+def test_live_startup_bootstraps_when_no_cache_exists(tmp_path: Path) -> None:
+    downloader = FakeLiveCatchupDownloader(latest_completed_open_time_ms=120_000)
+
+    runtime = BackendRuntime(
+        settings=live_enabled_settings(data_root=tmp_path, history_horizon_days=1),
+        mode=RuntimeMode.LIVE_BITMART,
+        live_stream_runner_factory=lambda client: RecordingLiveStreamRunner().bind(client),
+        historical_downloader=downloader,
+    )
+
+    runtime.start()
+    components = {component.name: component for component in runtime.health().components}
+
+    assert downloader.requests == [(0, 180_000)]
+    assert components["sync_loaded_count"].message == "3"
+    assert len(runtime.visualization_api.get_candles("BTCUSDT", Timeframe.ONE_MINUTE)) == 3
+
+
+def test_historical_replay_strict_policy_fails_on_gap() -> None:
+    """M31.6.1 STRICT replay rejects exact 1m discontinuities before aggregation."""
+
+    request = gapped_replay_request()
+    runtime = BackendRuntime(
+        mode=RuntimeMode.HISTORICAL,
+        historical_config=HistoricalRuntimeConfig(request=request),
+        historical_loader=FixtureHistoricalLoader(gapped_replay_candles()),
+    )
+
+    with pytest.raises(ValueError, match="Strict historical replay rejected discontinuity"):
+        runtime.start()
+
+    health = runtime.health()
+    assert health.state is RuntimeState.FAILED
+    assert health.replay_integrity is not None
+    assert health.replay_integrity.gap_count == 1
+    assert health.replay_integrity.gaps[0].missing_candle_count == 5
+
+
+def test_historical_replay_warn_policy_records_gap_and_continues(tmp_path: Path) -> None:
+    """M31.6.1 WARN replay resets aggregation and continues after known gaps."""
+
+    request = gapped_replay_request()
+    candles = gapped_replay_candles(post_gap_count=8)
+    store = HistoricalCandleFileStore(tmp_path)
+    store.save_result(
+        request,
+        HistoricalCandleLoadResult(
+            candles=candles,
+            integrity_report=inferred_integrity_report(
+                request,
+                candles,
+                integrity_policy=HistoricalIntegrityPolicy.WARN,
+            ),
+        ),
+    )
+    runtime = BackendRuntime(
+        mode=RuntimeMode.HISTORICAL,
+        historical_config=HistoricalRuntimeConfig(
+            request=request,
+            data_root=tmp_path,
+            integrity_policy=HistoricalIntegrityPolicy.WARN,
+        ),
+    )
+
+    runtime.start()
+    components = {component.name: component for component in runtime.health().components}
+    five_minute_candles = runtime.visualization_api.get_candles("BTCUSDT", Timeframe.FIVE_MINUTE)
+
+    replay_integrity = runtime.health().replay_integrity
+    assert replay_integrity is not None
+    assert replay_integrity.status is HistoricalIntegrityStatus.DEGRADED
+    assert replay_integrity.gap_count == 1
+    assert components["replay_gap_count"].message == "1"
+    assert components["discarded_aggregation_bucket_count"].message != "0"
+    assert all(candle.open_time_ms >= 720_000 for candle in five_minute_candles)
+
+
+def test_historical_replay_allow_policy_records_gap_and_continues(tmp_path: Path) -> None:
+    """M31.6.1 ALLOW replay marks integrity incomplete and continues."""
+
+    request = gapped_replay_request()
+    candles = gapped_replay_candles(post_gap_count=8)
+    store = HistoricalCandleFileStore(tmp_path)
+    store.save_result(
+        request,
+        HistoricalCandleLoadResult(
+            candles=candles,
+            integrity_report=inferred_integrity_report(
+                request,
+                candles,
+                integrity_policy=HistoricalIntegrityPolicy.ALLOW,
+            ),
+        ),
+    )
+    runtime = BackendRuntime(
+        mode=RuntimeMode.HISTORICAL,
+        historical_config=HistoricalRuntimeConfig(
+            request=request,
+            data_root=tmp_path,
+            integrity_policy=HistoricalIntegrityPolicy.ALLOW,
+        ),
+    )
+
+    runtime.start()
+
+    assert runtime.health().state is RuntimeState.RUNNING
+    replay_integrity = runtime.health().replay_integrity
+    assert replay_integrity is not None
+    assert replay_integrity.status is HistoricalIntegrityStatus.INCOMPLETE
+
+
+def test_historical_replay_boundary_does_not_emit_cross_gap_higher_timeframe_candle(tmp_path: Path) -> None:
+    """M31.6.1 incomplete 5m/15m buckets touching a gap are discarded."""
+
+    request = HistoricalCandleRequest(
+        symbol="BTCUSDT",
+        timeframe=Timeframe.ONE_MINUTE,
+        start_time_ms=720_000,
+        end_time_ms=1_860_000,
+    )
+    candles = tuple(
+        candle_for_open_time("BTCUSDT", open_time_ms)
+        for open_time_ms in (
+            960_000,
+            1_020_000,
+            1_380_000,
+            1_440_000,
+            1_500_000,
+            1_560_000,
+            1_620_000,
+            1_680_000,
+            1_740_000,
+            1_800_000,
+        )
+    )
+    store = HistoricalCandleFileStore(tmp_path)
+    store.save_result(
+        request,
+        HistoricalCandleLoadResult(
+            candles=candles,
+            integrity_report=inferred_integrity_report(
+                request,
+                candles,
+                integrity_policy=HistoricalIntegrityPolicy.WARN,
+            ),
+        ),
+    )
+    runtime = BackendRuntime(
+        mode=RuntimeMode.HISTORICAL,
+        historical_config=HistoricalRuntimeConfig(
+            request=request,
+            data_root=tmp_path,
+            integrity_policy=HistoricalIntegrityPolicy.WARN,
+        ),
+    )
+
+    runtime.start()
+    five_minute = runtime.visualization_api.get_candles("BTCUSDT", Timeframe.FIVE_MINUTE)
+    fifteen_minute = runtime.visualization_api.get_candles("BTCUSDT", Timeframe.FIFTEEN_MINUTE)
+
+    assert [candle.open_time_ms for candle in five_minute] == [1_500_000]
+    assert fifteen_minute == ()
+
+
+def test_live_warn_policy_reaches_running_with_known_cache_gap(tmp_path: Path) -> None:
+    """M31.6.1 live startup may reach live after WARN replay gaps are segmented."""
+
+    request = gapped_replay_request()
+    candles = gapped_replay_candles(post_gap_count=8)
+    HistoricalCandleFileStore(tmp_path).save_result(
+        request,
+        HistoricalCandleLoadResult(
+            candles=candles,
+            integrity_report=inferred_integrity_report(
+                request,
+                candles,
+                integrity_policy=HistoricalIntegrityPolicy.WARN,
+            ),
+        ),
+    )
+    runtime = BackendRuntime(
+        settings=live_enabled_settings(
+            data_root=tmp_path,
+            historical_integrity_policy=HistoricalIntegrityPolicy.WARN,
+        ),
+        mode=RuntimeMode.LIVE_BITMART,
+        live_stream_runner_factory=lambda client: RecordingLiveStreamRunner().bind(client),
+        historical_downloader=FakeLiveCatchupDownloader(latest_completed_open_time_ms=candles[-1].open_time_ms),
+    )
+
+    runtime.start()
+    components = {component.name: component for component in runtime.health().components}
+
+    assert runtime.health().state is RuntimeState.RUNNING
+    assert components["market_data_state"].message in {"live", "connecting_stream"}
+    complete_cache_integrity = runtime.health().complete_cache_integrity
+    replay_integrity = runtime.health().replay_integrity
+    assert complete_cache_integrity is not None
+    assert complete_cache_integrity.gap_count == 1
+    assert replay_integrity is not None
+    assert replay_integrity.gap_count == 1
+
+
+def test_api_health_available_while_live_sync_initializes_in_background(tmp_path: Path) -> None:
+    """M31.6 keeps health reachable while long REST catch-up runs."""
+
+    downloader = BlockingLiveCatchupDownloader(latest_completed_open_time_ms=120_000)
+    runtime = BackendRuntime(
+        settings=live_enabled_settings(data_root=tmp_path, history_horizon_days=1),
+        mode=RuntimeMode.LIVE_BITMART,
+        live_stream_runner_factory=lambda client: RecordingLiveStreamRunner().bind(client),
+        historical_downloader=downloader,
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        assert downloader.entered.wait(timeout=2.0)
+        response = client.get("/api/health")
+        components = {component["name"]: component for component in response.json()["components"]}
+
+        assert response.status_code == 200
+        assert response.json()["state"] == RuntimeState.STARTING.value
+        assert components["market_data_state"]["message"] == "synchronizing"
+        assert components["sync_start_time_iso"]["message"].endswith("Z")
+
+        downloader.release.set()
+        assert wait_for_state(runtime, RuntimeState.RUNNING)
+
+
+def test_api_health_reports_live_startup_failure(tmp_path: Path) -> None:
+    """M31.6 surfaces background initialization failures through health."""
+
+    runtime = BackendRuntime(
+        settings=live_enabled_settings(data_root=tmp_path, history_horizon_days=1),
+        mode=RuntimeMode.LIVE_BITMART,
+        live_stream_runner_factory=lambda client: RecordingLiveStreamRunner().bind(client),
+        historical_downloader=FailingLiveCatchupDownloader(latest_completed_open_time_ms=120_000),
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        assert wait_for_state(runtime, RuntimeState.FAILED)
+        response = client.get("/api/health")
+        components = {component["name"]: component for component in response.json()["components"]}
+
+        assert response.status_code == 200
+        assert response.json()["state"] == RuntimeState.FAILED.value
+        assert components["market_data_state"]["message"] == "failed"
+        assert "RuntimeError" in components["startup_exception"]["message"]
 
 
 def test_runtime_wires_trade_events_into_existing_candle_pipeline() -> None:
@@ -474,6 +902,45 @@ def test_cli_entrypoint_starts_historical_live_once(
     assert '"state": "running"' in captured.out
 
 
+def test_cli_entrypoint_accepts_live_alias(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Normal live startup uses cache sync before stream handoff without manual dates."""
+
+    monkeypatch.setattr(
+        runtime_module,
+        "BitMartHistoricalCandleDownloader",
+        lambda: FakeLiveCatchupDownloader(latest_completed_open_time_ms=0),
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "BitMartUnavailableLiveStreamRunner",
+        lambda client: RecordingLiveStreamRunner().bind(client),
+    )
+
+    exit_code = main(
+        [
+            "--live",
+            "--symbol",
+            "BTCUSDT",
+            "--timeframe",
+            "1m",
+            "--historical-integrity-policy",
+            "strict",
+            "--data-root",
+            str(tmp_path),
+            "--once",
+        ],
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert '"mode": "live_bitmart"' in captured.out
+    assert '"state": "running"' in captured.out
+
+
 def test_runtime_does_not_duplicate_business_logic() -> None:
     """Covers no-new-trading-logic constraint and TEST-001."""
 
@@ -517,8 +984,94 @@ class RecordingLiveStreamRunner:
         self.stopped = True
 
 
-def live_enabled_settings(symbol: str = "BTCUSDT") -> PlatformSettings:
+class FakeLiveCatchupDownloader:
+    def __init__(self, *, symbol: str = "BTCUSDT", latest_completed_open_time_ms: int) -> None:
+        self.symbol = symbol
+        self.latest_completed = latest_completed_open_time_ms
+        self.requests: list[tuple[int, int]] = []
+
+    def latest_completed_open_time_ms(self, symbol: str) -> int:
+        assert symbol == self.symbol
+        return self.latest_completed
+
+    def load_result(
+        self,
+        request: HistoricalCandleRequest,
+        *,
+        integrity_policy: HistoricalIntegrityPolicy,
+    ) -> HistoricalCandleLoadResult:
+        self.requests.append((request.start_time_ms, request.end_time_ms))
+        candles = tuple(
+            candle_for_open_time(request.symbol, open_time_ms)
+            for open_time_ms in range(request.start_time_ms, request.end_time_ms, 60_000)
+        )
+        report = HistoricalIntegrityReport.valid(
+            ExchangeHistoricalCandleRequest(
+                exchange=ExchangeName.BITMART,
+                market_type=MarketType.USDT_M_PERPETUAL,
+                symbol=request.symbol,
+                timeframe=request.timeframe,
+                start_time_ms=request.start_time_ms,
+                end_time_ms=request.end_time_ms,
+                integrity_policy=integrity_policy,
+            ),
+            requested_candle_count=len(candles),
+            loaded_candle_count=len(candles),
+        )
+        return HistoricalCandleLoadResult(candles=candles, integrity_report=report)
+
+
+class BlockingLiveCatchupDownloader(FakeLiveCatchupDownloader):
+    def __init__(self, *, latest_completed_open_time_ms: int) -> None:
+        super().__init__(latest_completed_open_time_ms=latest_completed_open_time_ms)
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def load_result(
+        self,
+        request: HistoricalCandleRequest,
+        *,
+        integrity_policy: HistoricalIntegrityPolicy,
+    ) -> HistoricalCandleLoadResult:
+        self.entered.set()
+        assert self.release.wait(timeout=5.0)
+        return super().load_result(request, integrity_policy=integrity_policy)
+
+
+class FailingLiveCatchupDownloader(FakeLiveCatchupDownloader):
+    def load_result(
+        self,
+        request: HistoricalCandleRequest,
+        *,
+        integrity_policy: HistoricalIntegrityPolicy,
+    ) -> HistoricalCandleLoadResult:
+        raise RuntimeError("simulated catch-up failure")
+
+
+class FixtureHistoricalLoader:
+    def __init__(self, candles: tuple[Candle, ...]) -> None:
+        self._candles = candles
+
+    def load(self, request: HistoricalCandleRequest) -> tuple[Candle, ...]:
+        return self._candles
+
+
+def live_enabled_settings(
+    symbol: str = "BTCUSDT",
+    *,
+    data_root: Path | None = None,
+    history_horizon_days: int | None = None,
+    historical_integrity_policy: HistoricalIntegrityPolicy | None = None,
+) -> PlatformSettings:
     settings = load_settings()
+    historical_data = settings.historical_data
+    market_data_sync = settings.market_data_sync
+    if data_root is not None:
+        historical_data = historical_data.model_copy(update={"data_root": data_root})
+    if historical_integrity_policy is not None:
+        historical_data = historical_data.model_copy(update={"integrity_policy": historical_integrity_policy.value})
+    if history_horizon_days is not None:
+        market_data_sync = market_data_sync.model_copy(update={"history_horizon_days": history_horizon_days})
     return settings.model_copy(
         update={
             "market_data": settings.market_data.model_copy(
@@ -527,6 +1080,8 @@ def live_enabled_settings(symbol: str = "BTCUSDT") -> PlatformSettings:
                     "live_enabled": True,
                 },
             ),
+            "historical_data": historical_data,
+            "market_data_sync": market_data_sync,
         },
     )
 
@@ -570,6 +1125,48 @@ def historical_fixture_candles(*, count: int) -> tuple[Candle, ...]:
             ),
         )
     return tuple(candles)
+
+
+def gapped_replay_request() -> HistoricalCandleRequest:
+    return HistoricalCandleRequest(
+        symbol="BTCUSDT",
+        timeframe=Timeframe.ONE_MINUTE,
+        start_time_ms=960_000,
+        end_time_ms=1_860_000,
+    )
+
+
+def gapped_replay_candles(*, post_gap_count: int = 2) -> tuple[Candle, ...]:
+    # Fixture shape: 12:16, 12:17, missing 12:18-12:22, then 12:23 onward.
+    open_times = [960_000, 1_020_000]
+    open_times.extend(1_380_000 + index * 60_000 for index in range(post_gap_count))
+    return tuple(candle_for_open_time("BTCUSDT", open_time_ms) for open_time_ms in open_times)
+
+
+def candle_for_open_time(symbol: str, open_time_ms: int) -> Candle:
+    index = open_time_ms // 60_000
+    open_price = 100.0 + index
+    close = open_price + 1.0
+    return Candle(
+        symbol=symbol,
+        timeframe=Timeframe.ONE_MINUTE,
+        open_time_ms=open_time_ms,
+        close_time_ms=open_time_ms + 60_000,
+        open=open_price,
+        high=close + 1.0,
+        low=open_price - 1.0,
+        close=close,
+        volume=1.0,
+    )
+
+
+def wait_for_state(runtime: BackendRuntime, state: RuntimeState, *, timeout_s: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if runtime.state is state:
+            return True
+        time.sleep(0.01)
+    return runtime.state is state
 
 
 def incomplete_report(

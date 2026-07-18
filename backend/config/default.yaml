@@ -45,6 +45,7 @@ demo:
 
 historical_data:
   integrity_policy: strict
+  data_root: data/historical
 
 market_data_sync:
   enabled: false

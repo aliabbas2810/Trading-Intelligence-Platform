@@ -21,7 +21,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Start the TIP backend runtime")
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--dry-run", action="store_true", help="start without live BitMart streaming")
-    mode_group.add_argument("--live-bitmart", action="store_true", help="start BitMart live stream mode when config enables it")
+    mode_group.add_argument(
+        "--live",
+        "--live-bitmart",
+        dest="live_bitmart",
+        action="store_true",
+        help="load BitMart cache, REST catch up closed 1m candles, then start live stream mode",
+    )
     mode_group.add_argument("--historical", action="store_true", help="load local historical candle data")
     mode_group.add_argument(
         "--historical-live",
@@ -106,7 +112,10 @@ def settings_from_args(args: argparse.Namespace) -> PlatformSettings:
     settings = load_settings()
     updates: dict[str, object] = {
         "historical_data": settings.historical_data.model_copy(
-            update={"integrity_policy": args.historical_integrity_policy},
+            update={
+                "integrity_policy": args.historical_integrity_policy,
+                "data_root": Path(args.data_root),
+            },
         ),
     }
     if not (args.live_bitmart or args.historical_live):

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import time
+import threading
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from backend.api import (
     InMemoryAlignmentReadStore,
@@ -67,19 +69,30 @@ from backend.engines.trend import (
     TrendEngine,
     TrendState,
 )
-from backend.exchange import BitMartFuturesMarketDataAdapter, ExchangeName, HistoricalIntegrityPolicy, HistoricalIntegrityReport, MarketType
+from backend.exchange import (
+    BitMartFuturesMarketDataAdapter,
+    ExchangeName,
+    HistoricalDataGap,
+    HistoricalIntegrityPolicy,
+    HistoricalIntegrityReport,
+    HistoricalIntegrityStatus,
+    MarketType,
+)
 from backend.models import Candle, Timeframe, Trade
 from backend.pipelines.candle import CandleClosedEvent, OneMinuteCandlePipeline
 from backend.pipelines.market_data import (
+    BITMART_FUTURES_PUBLIC_WS_URL,
+    BITMART_FUTURES_TRADE_CHANNEL,
+    BitMartWebSocketLiveStreamRunner,
     BitMartTradeStreamClient,
     BitMartTradeStreamClientConfig,
-    BitMartWebSocketLiveStreamRunner,
     EventBusMarketDataPipeline,
     MarketDataConnectionStatus,
     MarketDataStatusEvent,
+    TradeReceivedEvent,
 )
 from backend.pipelines.timeframe import TimeframeCandleClosedEvent, TimeframePipeline
-from backend.storage import InMemoryCandleStore, JsonlCandleHistoryStore
+from backend.storage import CandleAlreadyExistsError, InMemoryCandleStore, JsonlCandleHistoryStore
 from backend.sync import (
     IncrementalSyncPlanner,
     MarketDataSyncCoordinator,
@@ -100,7 +113,24 @@ class RuntimeMode(str, Enum):
 
 class RuntimeState(str, Enum):
     CREATED = "created"
+    STARTING = "starting"
     RUNNING = "running"
+    FAILED = "failed"
+    STOPPED = "stopped"
+
+
+class MarketDataRuntimeState(str, Enum):
+    LOADING_CACHE = "loading_cache"
+    CONNECTING_STREAM = "connecting_stream"
+    SUBSCRIBING = "subscribing"
+    BUFFERING = "buffering"
+    SYNCHRONIZING = "synchronizing"
+    HANDING_OFF = "handing_off"
+    LIVE = "live"
+    RECONNECTING = "reconnecting"
+    DEGRADED = "degraded"
+    FAILED = "failed"
+    UNAVAILABLE = "unavailable"
     STOPPED = "stopped"
 
 
@@ -128,6 +158,9 @@ class RuntimeHealth:
     mode: RuntimeMode
     components: tuple[ComponentHealth, ...]
     historical_integrity: HistoricalIntegrityReport | None = None
+    last_sync_window_integrity: HistoricalIntegrityReport | None = None
+    complete_cache_integrity: HistoricalIntegrityReport | None = None
+    replay_integrity: HistoricalIntegrityReport | None = None
 
     @property
     def is_healthy(self) -> bool:
@@ -165,6 +198,66 @@ class HistoricalRuntimeConfig:
     integrity_policy: HistoricalIntegrityPolicy = HistoricalIntegrityPolicy.STRICT
 
 
+@dataclass(frozen=True, slots=True)
+class LiveCacheSyncDiagnostics:
+    market_data_state: MarketDataRuntimeState = MarketDataRuntimeState.STOPPED
+    websocket_endpoint: str = BITMART_FUTURES_PUBLIC_WS_URL
+    subscription_channel: str = BITMART_FUTURES_TRADE_CHANNEL
+    subscription_acknowledged: bool = False
+    cache_candle_count: int = 0
+    cache_last_open_time_ms: int | None = None
+    latest_exchange_closed_open_time_ms: int | None = None
+    sync_start_time_ms: int | None = None
+    sync_end_time_ms: int | None = None
+    sync_requested_count: int = 0
+    sync_page_count: int = 0
+    sync_retry_count: int = 0
+    sync_loaded_count: int = 0
+    sync_persisted_count: int = 0
+    sync_inserted_count: int = 0
+    sync_deduplicated_count: int = 0
+    sync_gap_count: int = 0
+    sync_window_gap_count: int = 0
+    newly_discovered_gap_count: int = 0
+    known_cache_gap_count: int = 0
+    replay_gap_count: int = 0
+    total_known_gap_count: int = 0
+    sync_current_final_persisted_open_time_ms: int | None = None
+    sync_target_final_open_time_ms: int | None = None
+    sync_last_progress_time_ms: int | None = None
+    shutdown_time_ms: int | None = None
+    live_stream_connected: bool = False
+    live_stream_connected_at_ms: int | None = None
+    live_stream_last_message_time_ms: int | None = None
+    live_stream_last_trade_time_ms: int | None = None
+    buffered_trade_count: int = 0
+    duplicate_trade_count: int = 0
+    malformed_trade_count: int = 0
+    reconnect_attempt_count: int = 0
+    current_forming_candle_open_time_ms: int | None = None
+    current_forming_candle_trade_count: int = 0
+    last_finalized_candle_open_time_ms: int | None = None
+    last_persisted_candle_open_time_ms: int | None = None
+    rest_reconciliation_count: int = 0
+    reconciled_candle_count: int = 0
+    candle_conflict_count: int = 0
+    discarded_aggregation_bucket_count: int = 0
+    last_stream_error: str | None = None
+
+
+class HistoricalCandleResultLoader(Protocol):
+    def load_result(
+        self,
+        request: HistoricalCandleRequest,
+        *,
+        integrity_policy: HistoricalIntegrityPolicy,
+    ) -> HistoricalCandleLoadResult:
+        """Load or download candles plus integrity metadata."""
+
+    def latest_completed_open_time_ms(self, symbol: str) -> int:
+        """Return latest fully closed 1m candle open time."""
+
+
 class RuntimeAlreadyStartedError(RuntimeError):
     """Raised when the local backend runtime is started twice."""
 
@@ -199,11 +292,50 @@ class BoundaryFilteringMarketDataPipeline(EventBusMarketDataPipeline):
     def __init__(self, event_bus: EventBus, accept_trade: Callable[[Trade], bool]) -> None:
         super().__init__(event_bus)
         self._accept_trade = accept_trade
+        self._buffering = False
+        self._buffered_trades: list[Trade] = []
+        self._seen_trade_keys: set[tuple[object, ...]] = set()
+        self.duplicate_trade_count = 0
 
     def publish_trade(self, trade: Trade) -> None:
         if not self._accept_trade(trade):
             return
+        key = self._trade_key(trade)
+        if key in self._seen_trade_keys:
+            self.duplicate_trade_count += 1
+            return
+        self._seen_trade_keys.add(key)
+        if self._buffering:
+            self._buffered_trades.append(trade)
+            return
         super().publish_trade(trade)
+
+    @property
+    def buffered_trade_count(self) -> int:
+        return len(self._buffered_trades)
+
+    def start_buffering(self) -> None:
+        self._buffering = True
+
+    def finish_handoff(self, *, finalized_through_ms: int | None) -> tuple[Trade, ...]:
+        replayable = tuple(
+            sorted(
+                (
+                    trade
+                    for trade in self._buffered_trades
+                    if finalized_through_ms is None or trade.timestamp_ms >= finalized_through_ms
+                ),
+                key=lambda item: (item.timestamp_ms, item.price, item.quantity),
+            )
+        )
+        self._buffered_trades.clear()
+        self._buffering = False
+        for trade in replayable:
+            super().publish_trade(trade)
+        return replayable
+
+    def _trade_key(self, trade: Trade) -> tuple[object, ...]:
+        return (trade.source, trade.symbol, trade.timestamp_ms, trade.price, trade.quantity)
 
 
 class BackendRuntime:
@@ -217,12 +349,14 @@ class BackendRuntime:
         live_stream_runner_factory: LiveStreamRunnerFactory | None = None,
         historical_config: HistoricalRuntimeConfig | None = None,
         historical_loader: HistoricalCandleLoader | None = None,
+        historical_downloader: HistoricalCandleResultLoader | None = None,
         market_data_sync_coordinator: MarketDataSyncCoordinator | None = None,
     ) -> None:
         self.settings = settings or load_settings()
         self.mode = mode
         self.historical_config = historical_config
         self._historical_loader = historical_loader
+        self._historical_downloader = historical_downloader
         self.market_data_sync_coordinator = (
             market_data_sync_coordinator
             if market_data_sync_coordinator is not None
@@ -277,11 +411,19 @@ class BackendRuntime:
         self._trend_engines: dict[tuple[str, Timeframe], TrendEngine] = {}
         self._trend_snapshots: dict[tuple[str, Timeframe], TimeframeTrendSnapshot] = {}
         self._state = RuntimeState.CREATED
+        self._lifecycle_lock = threading.Lock()
+        self._stop_requested = threading.Event()
+        self._startup_exception: str | None = None
         self._subscribed = False
         self._demo_seeded = False
         self._historical_loaded = False
         self._historical_candle_count = 0
         self._historical_integrity_report: HistoricalIntegrityReport | None = None
+        self._last_sync_window_integrity_report: HistoricalIntegrityReport | None = None
+        self._complete_cache_integrity_report: HistoricalIntegrityReport | None = None
+        self._replay_integrity_report: HistoricalIntegrityReport | None = None
+        self._live_cache_sync = LiveCacheSyncDiagnostics()
+        self._live_handoff_complete = False
         self._logger = get_logger(__name__)
 
     @property
@@ -291,35 +433,87 @@ class BackendRuntime:
     def start(self) -> None:
         """Start the local runtime and live stream when enabled for FR-101/RUNTIME-003."""
 
-        if self._state is RuntimeState.RUNNING:
-            raise RuntimeAlreadyStartedError("Backend runtime is already running")
+        with self._lifecycle_lock:
+            if self._state in {RuntimeState.STARTING, RuntimeState.RUNNING}:
+                raise RuntimeAlreadyStartedError("Backend runtime is already running")
+            self._state = RuntimeState.STARTING
+            self._stop_requested.clear()
+            self._startup_exception = None
 
-        configure_logging(self.settings)
-        self._subscribe_components()
-        self._hydrate_market_state_from_existing_stores()
-        self._load_historical_data_if_enabled()
-        self._seed_demo_data_if_enabled()
-        self._state = RuntimeState.RUNNING
-        self._start_market_data_sync_if_enabled()
-        self._start_live_stream_if_enabled()
-        self._logger.info("Backend runtime started")
+        try:
+            configure_logging(self.settings)
+            self._subscribe_components()
+            self._hydrate_market_state_from_existing_stores()
+            self._load_historical_data_if_enabled()
+            if self.mode is RuntimeMode.LIVE_BITMART and self.stream_enabled:
+                self.market_data_pipeline.start_buffering()
+                self._start_live_stream_if_enabled()
+                self._synchronize_live_cache_if_enabled()
+                self._finish_live_handoff()
+            else:
+                self._synchronize_live_cache_if_enabled()
+            self._seed_demo_data_if_enabled()
+            with self._lifecycle_lock:
+                self._state = RuntimeState.RUNNING
+            self._start_market_data_sync_if_enabled()
+            if self.mode is not RuntimeMode.LIVE_BITMART:
+                self._start_live_stream_if_enabled()
+            self._logger.info("Backend runtime started")
+        except Exception as exc:
+            self.record_startup_failure(exc)
+            raise
 
     def stop(self) -> None:
         """Stop the local runtime for RUNTIME-003."""
 
+        self._stop_requested.set()
         if self._live_stream_runner is not None:
             self._live_stream_runner.stop()
             self._stream_status = MarketDataConnectionStatus.STOPPED
         if self.market_data_sync_coordinator is not None:
             self.market_data_sync_coordinator.stop()
+        self._live_cache_sync = self._live_cache_sync_update(
+            market_data_state=MarketDataRuntimeState.STOPPED,
+            live_stream_connected=False,
+            shutdown_time_ms=current_time_ms(),
+        )
         self._state = RuntimeState.STOPPED
         self._logger.info("Backend runtime stopped")
+
+    @property
+    def requires_background_initialization(self) -> bool:
+        """Long live catch-up must not block FastAPI health availability."""
+
+        return self.mode is RuntimeMode.LIVE_BITMART and self.stream_enabled
+
+    def record_startup_failure(self, exc: Exception) -> None:
+        """Capture background initialization failures for RUNTIME-004 diagnostics."""
+
+        message = f"{type(exc).__name__}: {exc}"
+        if self._live_stream_runner is not None:
+            self._live_stream_runner.stop()
+        self._stream_status = MarketDataConnectionStatus.STOPPED
+        timestamp_ms = current_time_ms()
+        with self._lifecycle_lock:
+            if self._state is not RuntimeState.STOPPED:
+                self._state = RuntimeState.FAILED
+            self._startup_exception = message
+        self._live_cache_sync = self._live_cache_sync_update(
+            market_data_state=MarketDataRuntimeState.FAILED,
+            sync_end_time_ms=self._live_cache_sync.sync_end_time_ms or timestamp_ms,
+            shutdown_time_ms=timestamp_ms,
+            live_stream_connected=False,
+            last_stream_error=message,
+        )
+        self._logger.exception("Backend runtime startup failed")
 
     def health(self) -> RuntimeHealth:
         """Return component health/status for RUNTIME-004."""
 
         status = ComponentStatus.RUNNING if self._state is RuntimeState.RUNNING else ComponentStatus.READY
         if self._state is RuntimeState.STOPPED:
+            status = ComponentStatus.STOPPED
+        if self._state is RuntimeState.FAILED:
             status = ComponentStatus.STOPPED
 
         components = [
@@ -339,6 +533,165 @@ class BackendRuntime:
             ComponentHealth("stream_enabled", ComponentStatus.READY, str(self.stream_enabled)),
             ComponentHealth("stream_status", ComponentStatus.READY, self._stream_status.value),
             ComponentHealth("active_symbol", ComponentStatus.READY, self.active_symbol),
+            ComponentHealth("startup_exception", ComponentStatus.READY, str(self._startup_exception)),
+            ComponentHealth("market_data_state", ComponentStatus.READY, self._live_cache_sync.market_data_state.value),
+            ComponentHealth("websocket_endpoint", ComponentStatus.READY, self._live_cache_sync.websocket_endpoint),
+            ComponentHealth("subscription_channel", ComponentStatus.READY, self._live_cache_sync.subscription_channel),
+            ComponentHealth(
+                "subscription_acknowledged",
+                ComponentStatus.READY,
+                str(self._live_cache_sync.subscription_acknowledged),
+            ),
+            ComponentHealth("cache_candle_count", ComponentStatus.READY, str(self._live_cache_sync.cache_candle_count)),
+            ComponentHealth(
+                "cache_last_open_time_ms",
+                ComponentStatus.READY,
+                str(self._live_cache_sync.cache_last_open_time_ms),
+            ),
+            ComponentHealth(
+                "latest_exchange_closed_open_time_ms",
+                ComponentStatus.READY,
+                str(self._live_cache_sync.latest_exchange_closed_open_time_ms),
+            ),
+            ComponentHealth("sync_start_time_ms", ComponentStatus.READY, str(self._live_cache_sync.sync_start_time_ms)),
+            ComponentHealth("sync_end_time_ms", ComponentStatus.READY, str(self._live_cache_sync.sync_end_time_ms)),
+            ComponentHealth("sync_requested_count", ComponentStatus.READY, str(self._live_cache_sync.sync_requested_count)),
+            ComponentHealth("sync_page_count", ComponentStatus.READY, str(self._live_cache_sync.sync_page_count)),
+            ComponentHealth("sync_retry_count", ComponentStatus.READY, str(self._live_cache_sync.sync_retry_count)),
+            ComponentHealth("sync_loaded_count", ComponentStatus.READY, str(self._live_cache_sync.sync_loaded_count)),
+            ComponentHealth("sync_persisted_count", ComponentStatus.READY, str(self._live_cache_sync.sync_persisted_count)),
+            ComponentHealth("sync_inserted_count", ComponentStatus.READY, str(self._live_cache_sync.sync_inserted_count)),
+            ComponentHealth(
+                "sync_deduplicated_count",
+                ComponentStatus.READY,
+                str(self._live_cache_sync.sync_deduplicated_count),
+            ),
+            ComponentHealth("sync_gap_count", ComponentStatus.READY, str(self._live_cache_sync.sync_gap_count)),
+            ComponentHealth(
+                "sync_window_gap_count",
+                ComponentStatus.READY,
+                str(self._live_cache_sync.sync_window_gap_count),
+            ),
+            ComponentHealth(
+                "newly_discovered_gap_count",
+                ComponentStatus.READY,
+                str(self._live_cache_sync.newly_discovered_gap_count),
+            ),
+            ComponentHealth(
+                "known_cache_gap_count",
+                ComponentStatus.READY,
+                str(self._live_cache_sync.known_cache_gap_count),
+            ),
+            ComponentHealth("replay_gap_count", ComponentStatus.READY, str(self._live_cache_sync.replay_gap_count)),
+            ComponentHealth(
+                "total_known_gap_count",
+                ComponentStatus.READY,
+                str(self._live_cache_sync.total_known_gap_count),
+            ),
+            ComponentHealth(
+                "sync_current_final_persisted_open_time_ms",
+                ComponentStatus.READY,
+                str(self._live_cache_sync.sync_current_final_persisted_open_time_ms),
+            ),
+            ComponentHealth(
+                "sync_target_final_open_time_ms",
+                ComponentStatus.READY,
+                str(self._live_cache_sync.sync_target_final_open_time_ms),
+            ),
+            ComponentHealth(
+                "sync_last_progress_time_ms",
+                ComponentStatus.READY,
+                str(self._live_cache_sync.sync_last_progress_time_ms),
+            ),
+            ComponentHealth("sync_start_time_iso", ComponentStatus.READY, iso_timestamp(self._live_cache_sync.sync_start_time_ms)),
+            ComponentHealth("sync_end_time_iso", ComponentStatus.READY, iso_timestamp(self._live_cache_sync.sync_end_time_ms)),
+            ComponentHealth(
+                "sync_last_progress_time_iso",
+                ComponentStatus.READY,
+                iso_timestamp(self._live_cache_sync.sync_last_progress_time_ms),
+            ),
+            ComponentHealth(
+                "cache_last_open_time_iso",
+                ComponentStatus.READY,
+                iso_timestamp(self._live_cache_sync.cache_last_open_time_ms),
+            ),
+            ComponentHealth(
+                "latest_exchange_closed_open_time_iso",
+                ComponentStatus.READY,
+                iso_timestamp(self._live_cache_sync.latest_exchange_closed_open_time_ms),
+            ),
+            ComponentHealth(
+                "last_persisted_candle_open_time_iso",
+                ComponentStatus.READY,
+                iso_timestamp(self._live_cache_sync.last_persisted_candle_open_time_ms),
+            ),
+            ComponentHealth("shutdown_time_ms", ComponentStatus.READY, str(self._live_cache_sync.shutdown_time_ms)),
+            ComponentHealth("shutdown_time_iso", ComponentStatus.READY, iso_timestamp(self._live_cache_sync.shutdown_time_ms)),
+            ComponentHealth(
+                "live_stream_connected",
+                ComponentStatus.READY,
+                str(self._live_cache_sync.live_stream_connected),
+            ),
+            ComponentHealth(
+                "live_stream_connected_at_ms",
+                ComponentStatus.READY,
+                str(self._live_cache_sync.live_stream_connected_at_ms),
+            ),
+            ComponentHealth(
+                "live_stream_last_message_time_ms",
+                ComponentStatus.READY,
+                str(self._live_cache_sync.live_stream_last_message_time_ms),
+            ),
+            ComponentHealth(
+                "live_stream_last_trade_time_ms",
+                ComponentStatus.READY,
+                str(self._live_cache_sync.live_stream_last_trade_time_ms),
+            ),
+            ComponentHealth("buffered_trade_count", ComponentStatus.READY, str(self._live_cache_sync.buffered_trade_count)),
+            ComponentHealth("duplicate_trade_count", ComponentStatus.READY, str(self._live_cache_sync.duplicate_trade_count)),
+            ComponentHealth("malformed_trade_count", ComponentStatus.READY, str(self._live_cache_sync.malformed_trade_count)),
+            ComponentHealth(
+                "reconnect_attempt_count",
+                ComponentStatus.READY,
+                str(self._live_cache_sync.reconnect_attempt_count),
+            ),
+            ComponentHealth(
+                "current_forming_candle_open_time_ms",
+                ComponentStatus.READY,
+                str(self._live_cache_sync.current_forming_candle_open_time_ms),
+            ),
+            ComponentHealth(
+                "current_forming_candle_trade_count",
+                ComponentStatus.READY,
+                str(self._live_cache_sync.current_forming_candle_trade_count),
+            ),
+            ComponentHealth(
+                "last_finalized_candle_open_time_ms",
+                ComponentStatus.READY,
+                str(self._live_cache_sync.last_finalized_candle_open_time_ms),
+            ),
+            ComponentHealth(
+                "last_persisted_candle_open_time_ms",
+                ComponentStatus.READY,
+                str(self._live_cache_sync.last_persisted_candle_open_time_ms),
+            ),
+            ComponentHealth(
+                "rest_reconciliation_count",
+                ComponentStatus.READY,
+                str(self._live_cache_sync.rest_reconciliation_count),
+            ),
+            ComponentHealth(
+                "reconciled_candle_count",
+                ComponentStatus.READY,
+                str(self._live_cache_sync.reconciled_candle_count),
+            ),
+            ComponentHealth("candle_conflict_count", ComponentStatus.READY, str(self._live_cache_sync.candle_conflict_count)),
+            ComponentHealth(
+                "discarded_aggregation_bucket_count",
+                ComponentStatus.READY,
+                str(self._live_cache_sync.discarded_aggregation_bucket_count),
+            ),
+            ComponentHealth("last_stream_error", ComponentStatus.READY, str(self._live_cache_sync.last_stream_error)),
             ComponentHealth("candle_pipeline", status, "1m candle pipeline subscribed"),
             ComponentHealth("timeframe_pipeline", status, "higher timeframe pipeline subscribed"),
             ComponentHealth("structure_engine", status, "created lazily per symbol/timeframe"),
@@ -378,12 +731,30 @@ class BackendRuntime:
                 self._historical_integrity_component_status(),
                 self._historical_integrity_component_message(),
             ),
+            ComponentHealth(
+                "last_sync_window_integrity",
+                self._integrity_component_status(self._last_sync_window_integrity_report),
+                self._integrity_component_message(self._last_sync_window_integrity_report),
+            ),
+            ComponentHealth(
+                "complete_cache_integrity",
+                self._integrity_component_status(self._complete_cache_integrity_report),
+                self._integrity_component_message(self._complete_cache_integrity_report),
+            ),
+            ComponentHealth(
+                "replay_integrity",
+                self._integrity_component_status(self._replay_integrity_report),
+                self._integrity_component_message(self._replay_integrity_report),
+            ),
         ]
         return RuntimeHealth(
             state=self._state,
             mode=self.mode,
             components=tuple(components),
             historical_integrity=self._historical_integrity_report,
+            last_sync_window_integrity=self._last_sync_window_integrity_report,
+            complete_cache_integrity=self._complete_cache_integrity_report,
+            replay_integrity=self._replay_integrity_report,
         )
 
     def start_replay(
@@ -469,6 +840,9 @@ class BackendRuntime:
         self._historical_loaded = False
         self._historical_candle_count = 0
         self._historical_integrity_report = None
+        self._last_sync_window_integrity_report = None
+        self._complete_cache_integrity_report = None
+        self._replay_integrity_report = None
         self._historical_live_min_trade_timestamp_ms = None
 
     def market_structure_snapshot(self, symbol: str, timeframe: Timeframe) -> object:
@@ -1058,6 +1432,7 @@ class BackendRuntime:
         self.candle_pipeline.subscribe()
         self.timeframe_pipeline.subscribe()
         self.event_bus.subscribe(MarketDataStatusEvent, self._handle_market_data_status)
+        self.event_bus.subscribe(TradeReceivedEvent, self._handle_live_trade_received)
         self.event_bus.subscribe(CandleClosedEvent, self._handle_candle_closed)
         self.event_bus.subscribe(TimeframeCandleClosedEvent, self._handle_timeframe_candle_closed)
         self._subscribed = True
@@ -1166,8 +1541,23 @@ class BackendRuntime:
     def _start_live_stream_if_enabled(self) -> None:
         if not self.stream_enabled:
             return
+        self._live_cache_sync = self._live_cache_sync_update(
+            market_data_state=MarketDataRuntimeState.CONNECTING_STREAM,
+            websocket_endpoint=self.bitmart_stream_client.diagnostics.websocket_endpoint,
+            subscription_channel=self.bitmart_stream_client.diagnostics.subscription_channel,
+        )
         self._live_stream_runner = self._live_stream_runner_factory(self.bitmart_stream_client)
         self._live_stream_runner.start()
+        if self._stream_status is MarketDataConnectionStatus.ERROR:
+            self._live_cache_sync = self._live_cache_sync_update(
+                market_data_state=MarketDataRuntimeState.UNAVAILABLE,
+                live_stream_connected=False,
+            )
+        elif self.mode is RuntimeMode.LIVE_BITMART:
+            self._live_cache_sync = self._live_cache_sync_update(
+                market_data_state=MarketDataRuntimeState.BUFFERING,
+                buffered_trade_count=self.market_data_pipeline.buffered_trade_count,
+            )
 
     def _load_historical_data_if_enabled(self) -> None:
         if not self.historical_data_enabled or self._historical_loaded:
@@ -1177,18 +1567,22 @@ class BackendRuntime:
 
         historical_result = self._historical_candles()
         candles = historical_result.candles
+        self._complete_cache_integrity_report = historical_result.integrity_report
         self._historical_integrity_report = historical_result.integrity_report
         if historical_result.integrity_report.complete:
-            for candle in candles:
-                self._publish_historical_candle(candle)
+            self._replay_historical_candles(
+                candles,
+                integrity_policy=historical_result.integrity_report.policy,
+                source_request=self._historical_request_for_candles(candles),
+            )
         else:
-            if isinstance(self.candle_store, InMemoryCandleStore):
-                self.candle_store.save_many(candles)
-            else:
-                for candle in candles:
-                    self._ensure_candle_stored(candle)
+            self._replay_historical_candles(
+                candles,
+                integrity_policy=historical_result.integrity_report.policy,
+                source_request=self._historical_request_for_candles(candles),
+            )
             self._logger.warning(
-                "Loaded incomplete historical data without higher-timeframe aggregation "
+                "Loaded incomplete historical data with policy-aware segmented replay "
                 "policy=%s status=%s symbol=%s timeframe=%s requested_candle_count=%s "
                 "loaded_candle_count=%s gap_count=%s total_missing_candles=%s",
                 historical_result.integrity_report.policy.value,
@@ -1205,6 +1599,243 @@ class BackendRuntime:
         self._historical_loaded = True
         self._seed_cached_aois_if_possible()
         self._logger.info("Loaded historical candles into runtime")
+
+    def _synchronize_live_cache_if_enabled(self) -> None:
+        if self.mode is not RuntimeMode.LIVE_BITMART:
+            return
+        if not self.settings.market_data.live_enabled:
+            return
+
+        symbol = self.active_symbol
+        timeframe = Timeframe.ONE_MINUTE
+        exchange = self.settings.market_data.exchange
+        market_type = self.settings.market_data.market_type
+        store = HistoricalCandleFileStore(self.settings.historical_data.data_root)
+        downloader = self._historical_downloader or BitMartHistoricalCandleDownloader()
+        duration_ms = 60_000
+
+        started_ms = current_time_ms()
+        self._live_cache_sync = self._live_cache_sync_update(
+            market_data_state=MarketDataRuntimeState.LOADING_CACHE,
+            sync_start_time_ms=started_ms,
+        )
+        cached_result = store.merged_result(
+            exchange=exchange,
+            market_type=market_type,
+            symbol=symbol,
+            timeframe=timeframe,
+            integrity_policy=HistoricalIntegrityPolicy.WARN,
+        )
+        cached_candles = cached_result.candles if cached_result is not None else ()
+        cache_last_open_time_ms = cached_candles[-1].open_time_ms if cached_candles else None
+        latest_closed_open_time_ms = downloader.latest_completed_open_time_ms(symbol)
+        self._live_cache_sync = self._live_cache_sync_update(
+            market_data_state=MarketDataRuntimeState.SYNCHRONIZING,
+            cache_candle_count=len(cached_candles),
+            cache_last_open_time_ms=cache_last_open_time_ms,
+            latest_exchange_closed_open_time_ms=latest_closed_open_time_ms,
+            current_forming_candle_open_time_ms=latest_closed_open_time_ms + duration_ms,
+        )
+
+        baseline_start_ms = (
+            cached_candles[0].open_time_ms
+            if cached_candles
+            else max(
+                0,
+                latest_closed_open_time_ms - self.settings.market_data_sync.history_horizon_days * 24 * 60 * 60 * 1000,
+            )
+        )
+        catchup_start_ms = cache_last_open_time_ms + duration_ms if cache_last_open_time_ms is not None else baseline_start_ms
+        catchup_end_ms = latest_closed_open_time_ms + duration_ms
+        requested_count = max(0, (catchup_end_ms - catchup_start_ms) // duration_ms)
+        downloaded_parts: list[Candle] = []
+        integrity_report = cached_result.integrity_report if cached_result is not None else None
+        page_count = 0
+        retry_count = 0
+        if catchup_start_ms < catchup_end_ms:
+            self._live_cache_sync = self._live_cache_sync_update(
+                sync_requested_count=requested_count,
+                sync_target_final_open_time_ms=latest_closed_open_time_ms,
+            )
+            cursor_ms = catchup_start_ms
+            while cursor_ms < catchup_end_ms:
+                if self._stop_requested.is_set():
+                    break
+                page_end_ms = min(self._next_live_sync_window_end(cursor_ms), catchup_end_ms)
+                if page_end_ms <= cursor_ms:
+                    raise RuntimeError(
+                        "Live cache synchronization cursor did not advance "
+                        f"cursor_ms={cursor_ms} page_end_ms={page_end_ms}",
+                    )
+                catchup_request = HistoricalCandleRequest(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    start_time_ms=cursor_ms,
+                    end_time_ms=page_end_ms,
+                    exchange=exchange,
+                    market_type=market_type,
+                )
+                catchup_result = downloader.load_result(
+                    catchup_request,
+                    integrity_policy=HistoricalIntegrityPolicy(self.settings.historical_data.integrity_policy),
+                )
+                self._last_sync_window_integrity_report = catchup_result.integrity_report
+                if self._stop_requested.is_set():
+                    break
+                downloaded_parts.extend(catchup_result.candles)
+                integrity_report = catchup_result.integrity_report
+                page_count += max(1, getattr(catchup_result, "pages", 0))
+                retry_count += sum(gap.retry_count for gap in catchup_result.integrity_report.gaps)
+                if catchup_result.candles:
+                    store.save_daily_segments(
+                        catchup_result.candles,
+                        exchange=exchange,
+                        market_type=market_type,
+                    )
+                self._live_cache_sync = self._live_cache_sync_update(
+                    sync_page_count=page_count,
+                    sync_retry_count=retry_count,
+                    sync_loaded_count=len(downloaded_parts),
+                    sync_persisted_count=len(downloaded_parts),
+                    sync_gap_count=catchup_result.integrity_report.gap_count,
+                    sync_window_gap_count=catchup_result.integrity_report.gap_count,
+                    newly_discovered_gap_count=catchup_result.integrity_report.gap_count,
+                    sync_current_final_persisted_open_time_ms=(
+                        catchup_result.candles[-1].open_time_ms if catchup_result.candles else None
+                    ),
+                    sync_last_progress_time_ms=current_time_ms(),
+                )
+                cursor_ms = page_end_ms
+        downloaded = tuple(downloaded_parts)
+
+        merged_by_open_time = {candle.open_time_ms: candle for candle in cached_candles}
+        deduplicated = 0
+        inserted = 0
+        for candle in downloaded:
+            if candle.open_time_ms in merged_by_open_time:
+                deduplicated += 1
+            else:
+                inserted += 1
+            merged_by_open_time[candle.open_time_ms] = candle
+        merged_candles = tuple(merged_by_open_time[key] for key in sorted(merged_by_open_time))
+        if merged_candles:
+            merged_request = HistoricalCandleRequest(
+                symbol=symbol,
+                timeframe=timeframe,
+                start_time_ms=merged_candles[0].open_time_ms,
+                end_time_ms=merged_candles[-1].open_time_ms + duration_ms,
+                exchange=exchange,
+                market_type=market_type,
+            )
+            merged_report = self._merged_live_integrity_report(
+                merged_request,
+                merged_candles,
+                fallback=integrity_report,
+            )
+            self._historical_integrity_report = merged_report
+            self._complete_cache_integrity_report = merged_report
+            self._historical_candle_count = len(merged_candles)
+            self._historical_live_min_trade_timestamp_ms = merged_candles[-1].close_time_ms
+            self._replay_historical_candles(
+                merged_candles,
+                integrity_policy=HistoricalIntegrityPolicy(self.settings.historical_data.integrity_policy),
+                source_request=merged_request,
+            )
+            self._seed_cached_aois_if_possible()
+
+        self._live_cache_sync = self._live_cache_sync_update(
+            market_data_state=MarketDataRuntimeState.HANDING_OFF,
+            cache_candle_count=len(merged_candles),
+            cache_last_open_time_ms=merged_candles[-1].open_time_ms if merged_candles else None,
+            latest_exchange_closed_open_time_ms=latest_closed_open_time_ms,
+            sync_end_time_ms=current_time_ms(),
+            sync_requested_count=requested_count,
+            sync_page_count=page_count,
+            sync_retry_count=retry_count,
+            sync_loaded_count=len(downloaded),
+            sync_persisted_count=len(downloaded),
+            sync_inserted_count=inserted,
+            sync_deduplicated_count=deduplicated,
+            sync_gap_count=self._historical_integrity_report.gap_count if self._historical_integrity_report else 0,
+            sync_window_gap_count=(
+                self._last_sync_window_integrity_report.gap_count
+                if self._last_sync_window_integrity_report is not None
+                else 0
+            ),
+            known_cache_gap_count=(
+                self._complete_cache_integrity_report.gap_count
+                if self._complete_cache_integrity_report is not None
+                else 0
+            ),
+            replay_gap_count=(
+                self._replay_integrity_report.gap_count
+                if self._replay_integrity_report is not None
+                else 0
+            ),
+            total_known_gap_count=(
+                self._complete_cache_integrity_report.gap_count
+                if self._complete_cache_integrity_report is not None
+                else 0
+            ),
+            sync_current_final_persisted_open_time_ms=merged_candles[-1].open_time_ms if merged_candles else None,
+            sync_target_final_open_time_ms=latest_closed_open_time_ms,
+            sync_last_progress_time_ms=current_time_ms(),
+            last_finalized_candle_open_time_ms=merged_candles[-1].open_time_ms if merged_candles else None,
+            last_persisted_candle_open_time_ms=merged_candles[-1].open_time_ms if merged_candles else None,
+            rest_reconciliation_count=self._live_cache_sync.rest_reconciliation_count + 1,
+            reconciled_candle_count=len(downloaded),
+        )
+
+    def _next_live_sync_window_end(self, start_time_ms: int) -> int:
+        """Return the next resumable UTC-day checkpoint boundary for live catch-up."""
+
+        utc_day_ms = 24 * 60 * 60 * 1000
+        day_end_ms = start_time_ms - (start_time_ms % utc_day_ms) + utc_day_ms
+        return min(start_time_ms + utc_day_ms, day_end_ms)
+
+    def _finish_live_handoff(self) -> None:
+        if self.mode is not RuntimeMode.LIVE_BITMART:
+            return
+        replayed = self.market_data_pipeline.finish_handoff(
+            finalized_through_ms=self._historical_live_min_trade_timestamp_ms,
+        )
+        self._live_handoff_complete = True
+        diagnostics = self.bitmart_stream_client.diagnostics
+        state = (
+            MarketDataRuntimeState.LIVE
+            if diagnostics.subscription_acknowledged and self._stream_status is MarketDataConnectionStatus.CONNECTED
+            else MarketDataRuntimeState.CONNECTING_STREAM
+        )
+        self._live_cache_sync = self._live_cache_sync_update(
+            market_data_state=state,
+            subscription_acknowledged=diagnostics.subscription_acknowledged,
+            live_stream_connected=diagnostics.connected,
+            live_stream_connected_at_ms=diagnostics.connected_at_ms,
+            live_stream_last_message_time_ms=diagnostics.last_message_time_ms,
+            live_stream_last_trade_time_ms=diagnostics.last_trade_time_ms,
+            buffered_trade_count=0,
+            duplicate_trade_count=diagnostics.duplicate_trade_count + self.market_data_pipeline.duplicate_trade_count,
+            malformed_trade_count=diagnostics.malformed_trade_count,
+            reconnect_attempt_count=diagnostics.reconnect_attempt_count,
+            current_forming_candle_trade_count=len(replayed),
+            last_stream_error=diagnostics.last_stream_error,
+        )
+
+    def _merged_live_integrity_report(
+        self,
+        request: HistoricalCandleRequest,
+        candles: tuple[Candle, ...],
+        *,
+        fallback: HistoricalIntegrityReport | None,
+    ) -> HistoricalIntegrityReport:
+        from backend.engines.historical.loader import inferred_integrity_report
+
+        report = inferred_integrity_report(
+            request,
+            candles,
+            integrity_policy=HistoricalIntegrityPolicy(self.settings.historical_data.integrity_policy),
+        )
+        return report
 
     def _historical_candles(self) -> HistoricalCandleLoadResult:
         if self.historical_config is None:
@@ -1253,6 +1884,144 @@ class BackendRuntime:
         self._ensure_candle_stored(candle)
         self.event_bus.publish(TimeframeCandleClosedEvent(candle=candle))
 
+    def _replay_historical_candles(
+        self,
+        candles: tuple[Candle, ...],
+        *,
+        integrity_policy: HistoricalIntegrityPolicy,
+        source_request: HistoricalCandleRequest,
+    ) -> None:
+        """Replay completed cache candles through segmented downstream paths."""
+
+        from backend.engines.historical.loader import (
+            expected_candle_count,
+            exchange_request_from_historical_request,
+            historical_gap_from_missing_times,
+            historical_status_for_policy,
+        )
+
+        sorted_candles = tuple(sorted(candles, key=lambda item: (item.timeframe.value, item.open_time_ms)))
+        one_minute_candles = tuple(candle for candle in sorted_candles if candle.timeframe is Timeframe.ONE_MINUTE)
+        gaps: list[HistoricalDataGap] = []
+        previous: Candle | None = None
+        for candle in one_minute_candles:
+            if previous is not None and candle.open_time_ms != previous.close_time_ms:
+                missing_times = tuple(range(previous.close_time_ms, candle.open_time_ms, 60_000))
+                gap = historical_gap_from_missing_times(source_request, missing_times)
+                gaps.append(gap)
+                if integrity_policy is HistoricalIntegrityPolicy.STRICT:
+                    self._replay_integrity_report = HistoricalIntegrityReport.from_gaps(
+                        exchange_request_from_historical_request(
+                            source_request,
+                            integrity_policy=integrity_policy,
+                        ),
+                        status=HistoricalIntegrityStatus.FAILED,
+                        gaps=tuple(gaps),
+                        requested_candle_count=expected_candle_count(source_request),
+                        loaded_candle_count=len(one_minute_candles),
+                    )
+                    self._historical_integrity_report = self._replay_integrity_report
+                    raise ValueError(
+                        "Strict historical replay rejected discontinuity "
+                        f"previous_open_time_ms={previous.open_time_ms} "
+                        f"expected_open_time_ms={previous.close_time_ms} "
+                        f"actual_open_time_ms={candle.open_time_ms} "
+                        f"missing_candle_count={len(missing_times)}",
+                    )
+                self._handle_historical_replay_gap(previous, candle, gap, integrity_policy)
+            self._publish_historical_candle(candle)
+            previous = candle
+
+        if not gaps:
+            self._replay_integrity_report = HistoricalIntegrityReport.valid(
+                exchange_request_from_historical_request(
+                    source_request,
+                    integrity_policy=integrity_policy,
+                ),
+                requested_candle_count=expected_candle_count(source_request),
+                loaded_candle_count=len(one_minute_candles),
+            )
+            return
+        self._replay_integrity_report = HistoricalIntegrityReport.from_gaps(
+            exchange_request_from_historical_request(
+                source_request,
+                integrity_policy=integrity_policy,
+            ),
+            status=historical_status_for_policy(integrity_policy),
+            gaps=tuple(gaps),
+            requested_candle_count=expected_candle_count(source_request),
+            loaded_candle_count=len(one_minute_candles),
+        )
+        self._historical_integrity_report = self._replay_integrity_report
+        self._live_cache_sync = self._live_cache_sync_update(
+            replay_gap_count=len(gaps),
+            total_known_gap_count=max(self._live_cache_sync.total_known_gap_count, len(gaps)),
+        )
+
+    def _handle_historical_replay_gap(
+        self,
+        previous: Candle,
+        current: Candle,
+        gap: HistoricalDataGap,
+        integrity_policy: HistoricalIntegrityPolicy,
+    ) -> None:
+        discarded = self.timeframe_pipeline.reset_for_discontinuity()
+        self._structure_engines = {}
+        self._trend_engines = {}
+        self._trend_snapshots = {}
+        self.multi_timeframe_aggregator = MultiTimeframeTrendAggregator()
+        self.market_state_service.reset()
+        self.alignment_store = InMemoryAlignmentReadStore()
+        self.visualization_api = VisualizationReadApi(
+            candle_store=self.candle_store,
+            structure_store=self.structure_store,
+            trend_store=self.trend_store,
+            alignment_store=self.alignment_store,
+        )
+        self._live_cache_sync = self._live_cache_sync_update(
+            replay_gap_count=self._live_cache_sync.replay_gap_count + 1,
+            discarded_aggregation_bucket_count=(
+                self._live_cache_sync.discarded_aggregation_bucket_count + len(discarded)
+            ),
+        )
+        self._logger.warning(
+            "Historical replay accepted gap boundary",
+            extra={
+                "policy": integrity_policy.value,
+                "previous_open_time_ms": previous.open_time_ms,
+                "expected_open_time_ms": previous.close_time_ms,
+                "actual_open_time_ms": current.open_time_ms,
+                "missing_candle_count": gap.missing_candle_count,
+                "discarded_aggregation_buckets": tuple(
+                    {
+                        "timeframe": item.timeframe.value,
+                        "open_time_ms": item.open_time_ms,
+                        "close_time_ms": item.close_time_ms,
+                    }
+                    for item in discarded
+                ),
+            },
+        )
+
+    def _historical_request_for_candles(self, candles: tuple[Candle, ...]) -> HistoricalCandleRequest:
+        if not candles:
+            if self.historical_config is None:
+                raise ValueError("Cannot infer historical request for empty candle set")
+            return self.historical_config.request
+        one_minute_candles = tuple(candle for candle in candles if candle.timeframe is Timeframe.ONE_MINUTE)
+        source = tuple(sorted(one_minute_candles or candles, key=lambda item: item.open_time_ms))
+        from backend.pipelines.timeframe.aggregation import timeframe_duration_ms
+
+        duration_ms = timeframe_duration_ms(source[0].timeframe)
+        return HistoricalCandleRequest(
+            symbol=source[0].symbol,
+            timeframe=source[0].timeframe,
+            start_time_ms=source[0].open_time_ms,
+            end_time_ms=source[-1].open_time_ms + duration_ms,
+            exchange=self.settings.market_data.exchange,
+            market_type=self.settings.market_data.market_type,
+        )
+
     def _set_historical_live_boundary(self, candles: tuple[Candle, ...]) -> None:
         """Set the earliest accepted live trade timestamp after historical preload."""
 
@@ -1266,7 +2035,7 @@ class BackendRuntime:
     def _accept_trade_for_runtime(self, trade: Trade) -> bool:
         """Keep historical/live continuity deterministic without changing candle rules."""
 
-        if self.mode is not RuntimeMode.HISTORICAL_LIVE:
+        if self.mode not in {RuntimeMode.HISTORICAL_LIVE, RuntimeMode.LIVE_BITMART}:
             return True
         if self._historical_live_min_trade_timestamp_ms is None:
             return True
@@ -1404,6 +2173,54 @@ class BackendRuntime:
 
     def _handle_market_data_status(self, event: MarketDataStatusEvent) -> None:
         self._stream_status = event.status
+        state = self._live_cache_sync.market_data_state
+        if event.status is MarketDataConnectionStatus.CONNECTED:
+            state = (
+                MarketDataRuntimeState.BUFFERING
+                if self.market_data_pipeline.buffered_trade_count or not self._live_handoff_complete
+                else MarketDataRuntimeState.LIVE
+            )
+        elif event.status is MarketDataConnectionStatus.CONNECTING:
+            state = MarketDataRuntimeState.CONNECTING_STREAM
+        elif event.status is MarketDataConnectionStatus.RECONNECTING:
+            state = MarketDataRuntimeState.RECONNECTING
+        elif event.status is MarketDataConnectionStatus.DISCONNECTED:
+            state = MarketDataRuntimeState.DEGRADED
+        elif event.status is MarketDataConnectionStatus.ERROR:
+            state = MarketDataRuntimeState.UNAVAILABLE
+        elif event.status is MarketDataConnectionStatus.STOPPED:
+            state = MarketDataRuntimeState.STOPPED
+        diagnostics = self.bitmart_stream_client.diagnostics
+        self._live_cache_sync = self._live_cache_sync_update(
+            market_data_state=state,
+            live_stream_connected=event.status is MarketDataConnectionStatus.CONNECTED,
+            websocket_endpoint=diagnostics.websocket_endpoint,
+            subscription_channel=diagnostics.subscription_channel,
+            subscription_acknowledged=diagnostics.subscription_acknowledged,
+            live_stream_connected_at_ms=diagnostics.connected_at_ms,
+            live_stream_last_message_time_ms=diagnostics.last_message_time_ms,
+            live_stream_last_trade_time_ms=diagnostics.last_trade_time_ms,
+            buffered_trade_count=self.market_data_pipeline.buffered_trade_count,
+            duplicate_trade_count=diagnostics.duplicate_trade_count + self.market_data_pipeline.duplicate_trade_count,
+            malformed_trade_count=diagnostics.malformed_trade_count,
+            reconnect_attempt_count=diagnostics.reconnect_attempt_count,
+            last_stream_error=diagnostics.last_stream_error,
+        )
+
+    def _handle_live_trade_received(self, event: TradeReceivedEvent) -> None:
+        if self.mode not in {RuntimeMode.LIVE_BITMART, RuntimeMode.HISTORICAL_LIVE}:
+            return
+        forming_open_time_ms = (event.trade.timestamp_ms // 60_000) * 60_000
+        self._live_cache_sync = self._live_cache_sync_update(
+            live_stream_last_message_time_ms=event.trade.timestamp_ms,
+            live_stream_last_trade_time_ms=event.trade.timestamp_ms,
+            current_forming_candle_open_time_ms=forming_open_time_ms,
+            buffered_trade_count=self.market_data_pipeline.buffered_trade_count,
+            current_forming_candle_trade_count=self._live_cache_sync.current_forming_candle_trade_count + 1,
+        )
+
+    def _live_cache_sync_update(self, **updates: Any) -> LiveCacheSyncDiagnostics:
+        return replace(self._live_cache_sync, **updates)
 
     def _bitmart_component_status(self, fallback: ComponentStatus) -> ComponentStatus:
         if self.mode in {RuntimeMode.DRY_RUN, RuntimeMode.HISTORICAL}:
@@ -1423,7 +2240,7 @@ class BackendRuntime:
             return "disabled by config"
         if self._stream_status is MarketDataConnectionStatus.ERROR:
             return "bitmart_live_stream_unavailable"
-        return f"bitmart:{self.settings.market_data_sync.market_type}:{self.active_symbol}"
+        return f"bitmart:{self.settings.market_data.market_type}:{self.active_symbol}"
 
     def _demo_component_status(self) -> ComponentStatus:
         if not self.demo_data_enabled:
@@ -1486,6 +2303,16 @@ class BackendRuntime:
         report = self._historical_integrity_report
         if report is None:
             return "no historical integrity report"
+        return self._integrity_component_message(report)
+
+    def _integrity_component_status(self, report: HistoricalIntegrityReport | None) -> ComponentStatus:
+        if report is None:
+            return ComponentStatus.DISABLED
+        return ComponentStatus.READY
+
+    def _integrity_component_message(self, report: HistoricalIntegrityReport | None) -> str:
+        if report is None:
+            return "no historical integrity report"
         return (
             f"policy={report.policy.value} status={report.status.value} complete={report.complete} "
             f"requested={report.requested_candle_count} loaded={report.loaded_candle_count} "
@@ -1502,16 +2329,41 @@ class BackendRuntime:
 
     def _handle_candle_closed(self, event: CandleClosedEvent) -> None:
         self._ensure_candle_stored(event.candle)
+        if self.mode in {RuntimeMode.LIVE_BITMART, RuntimeMode.HISTORICAL_LIVE}:
+            if self.mode is RuntimeMode.LIVE_BITMART and event.candle.timeframe is Timeframe.ONE_MINUTE:
+                self._persist_live_closed_candle(event.candle)
+            self._live_cache_sync = self._live_cache_sync_update(
+                last_finalized_candle_open_time_ms=event.candle.open_time_ms,
+                current_forming_candle_open_time_ms=event.candle.close_time_ms,
+            )
         self._handle_completed_candle(event.candle)
+
+    def _persist_live_closed_candle(self, candle: Candle) -> None:
+        store = HistoricalCandleFileStore(self.settings.historical_data.data_root)
+        try:
+            store.save_candle_segment(
+                candle,
+                exchange=self.settings.market_data.exchange,
+                market_type=self.settings.market_data.market_type,
+            )
+            self._live_cache_sync = self._live_cache_sync_update(
+                last_persisted_candle_open_time_ms=candle.open_time_ms,
+            )
+        except ValueError as exc:
+            self._live_cache_sync = self._live_cache_sync_update(
+                candle_conflict_count=self._live_cache_sync.candle_conflict_count + 1,
+                last_stream_error=str(exc),
+            )
+            self._logger.warning("Live candle persistence conflict: %s", exc)
 
     def _handle_timeframe_candle_closed(self, event: TimeframeCandleClosedEvent) -> None:
         self._handle_completed_candle(event.candle)
 
     def _ensure_candle_stored(self, candle: Candle) -> None:
-        existing = self.candle_store.list(candle.symbol, candle.timeframe)
-        if any(stored.open_time_ms == candle.open_time_ms for stored in existing):
+        try:
+            self.candle_store.save(candle)
+        except CandleAlreadyExistsError:
             return
-        self.candle_store.save(candle)
 
     def _handle_completed_candle(self, candle: Candle) -> None:
         if candle.timeframe not in MARKET_STRUCTURE_TIMEFRAMES:
@@ -1722,3 +2574,9 @@ def structure_event_identity(event: StructureEvent) -> tuple[str, Timeframe]:
 
 def current_time_ms() -> int:
     return int(time.time() * 1000)
+
+
+def iso_timestamp(timestamp_ms: int | None) -> str:
+    if timestamp_ms is None:
+        return "None"
+    return datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC).isoformat().replace("+00:00", "Z")

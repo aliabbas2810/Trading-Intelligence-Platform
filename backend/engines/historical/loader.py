@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -23,6 +25,7 @@ from backend.pipelines.timeframe.aggregation import timeframe_duration_ms
 
 
 DEFAULT_HISTORICAL_DATA_ROOT = Path("data") / "historical"
+UTC_DAY_MS = 24 * 60 * 60 * 1000
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +63,7 @@ class HistoricalCandleLoader(Protocol):
 class HistoricalCandleLoadResult:
     candles: tuple[Candle, ...]
     integrity_report: HistoricalIntegrityReport
+    pages: int = 0
 
 
 class HistoricalCandleFileStore:
@@ -71,6 +75,87 @@ class HistoricalCandleFileStore:
     def path_for(self, request: HistoricalCandleRequest) -> Path:
         filename = f"{request.start_time_ms}_{request.end_time_ms}.jsonl"
         return self._root / request.exchange / request.market_type / request.symbol / request.timeframe.value / filename
+
+    def discover_compatible_requests(
+        self,
+        *,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+        timeframe: Timeframe,
+    ) -> tuple[HistoricalCandleRequest, ...]:
+        """Discover local compatible BitMart cache segments for SYNC-001/SYNC-006."""
+
+        directory = self._root / exchange / market_type / symbol / timeframe.value
+        if not directory.exists():
+            return ()
+        requests: list[HistoricalCandleRequest] = []
+        for path in directory.glob("*.jsonl"):
+            match = re.fullmatch(r"(\d+)_(\d+)\.jsonl", path.name)
+            if match is None:
+                continue
+            requests.append(
+                HistoricalCandleRequest(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    start_time_ms=int(match.group(1)),
+                    end_time_ms=int(match.group(2)),
+                    exchange=exchange,
+                    market_type=market_type,
+                )
+            )
+        return tuple(sorted(requests, key=lambda item: (item.start_time_ms, item.end_time_ms)))
+
+    def load_compatible_segments(
+        self,
+        *,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+        timeframe: Timeframe,
+        integrity_policy: HistoricalIntegrityPolicy,
+    ) -> tuple[HistoricalCandleLoadResult, ...]:
+        return tuple(
+            self.load_result(request, integrity_policy=integrity_policy)
+            for request in self.discover_compatible_requests(
+                exchange=exchange,
+                market_type=market_type,
+                symbol=symbol,
+                timeframe=timeframe,
+            )
+        )
+
+    def merged_result(
+        self,
+        *,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+        timeframe: Timeframe,
+        integrity_policy: HistoricalIntegrityPolicy,
+    ) -> HistoricalCandleLoadResult | None:
+        segments = self.load_compatible_segments(
+            exchange=exchange,
+            market_type=market_type,
+            symbol=symbol,
+            timeframe=timeframe,
+            integrity_policy=integrity_policy,
+        )
+        if not segments:
+            return None
+        candles = self._normalized_candles(candle for segment in segments for candle in segment.candles)
+        if not candles:
+            return None
+        request = HistoricalCandleRequest(
+            symbol=symbol,
+            timeframe=timeframe,
+            start_time_ms=candles[0].open_time_ms,
+            end_time_ms=candles[-1].open_time_ms + timeframe_duration_ms(timeframe),
+            exchange=exchange,
+            market_type=market_type,
+        )
+        report = inferred_integrity_report(request, candles, integrity_policy=integrity_policy)
+        return HistoricalCandleLoadResult(candles=candles, integrity_report=report)
 
     def integrity_path_for(self, request: HistoricalCandleRequest) -> Path:
         return self.path_for(request).with_suffix(".integrity.json")
@@ -90,6 +175,76 @@ class HistoricalCandleFileStore:
             HistoricalCandleLoadResult(candles=sorted_candles, integrity_report=report),
         )
 
+    def save_candle_segment(
+        self,
+        candle: Candle,
+        *,
+        exchange: str,
+        market_type: str,
+    ) -> Path:
+        """Persist one finalized live candle into an atomic UTC-day segment."""
+
+        return self.save_daily_segments(
+            (candle,),
+            exchange=exchange,
+            market_type=market_type,
+        )[0]
+
+    def save_daily_segments(
+        self,
+        candles: Iterable[Candle],
+        *,
+        exchange: str,
+        market_type: str,
+    ) -> tuple[Path, ...]:
+        """Persist candles into deterministic UTC-day JSONL segments for live/cache catch-up."""
+
+        grouped: dict[tuple[str, Timeframe, int], list[Candle]] = {}
+        for candle in candles:
+            day_start_ms = floor_to_utc_day_ms(candle.open_time_ms)
+            grouped.setdefault((candle.symbol, candle.timeframe, day_start_ms), []).append(candle)
+
+        paths: list[Path] = []
+        for (symbol, timeframe, day_start_ms), segment_candles in sorted(grouped.items()):
+            request = HistoricalCandleRequest(
+                symbol=symbol,
+                timeframe=timeframe,
+                start_time_ms=day_start_ms,
+                end_time_ms=day_start_ms + UTC_DAY_MS,
+                exchange=exchange,
+                market_type=market_type,
+            )
+            existing: tuple[Candle, ...] = ()
+            if self.path_for(request).exists():
+                existing = self.load_result(request, integrity_policy=HistoricalIntegrityPolicy.WARN).candles
+            self._validate_no_conflicting_candles(existing, segment_candles)
+            merged = self._normalized_candles((*existing, *segment_candles))
+            report = inferred_integrity_report(request, merged, integrity_policy=HistoricalIntegrityPolicy.WARN)
+            paths.append(self.save_result(request, HistoricalCandleLoadResult(candles=merged, integrity_report=report)))
+        return tuple(paths)
+
+    def save_range_segment(
+        self,
+        candles: Iterable[Candle],
+        *,
+        exchange: str,
+        market_type: str,
+    ) -> Path:
+        sorted_candles = self._normalized_candles(candles)
+        if not sorted_candles:
+            raise ValueError("Cannot persist an empty historical range segment")
+        duration_ms = timeframe_duration_ms(sorted_candles[0].timeframe)
+        request = HistoricalCandleRequest(
+            symbol=sorted_candles[0].symbol,
+            timeframe=sorted_candles[0].timeframe,
+            start_time_ms=sorted_candles[0].open_time_ms,
+            end_time_ms=sorted_candles[-1].open_time_ms + duration_ms,
+            exchange=exchange,
+            market_type=market_type,
+        )
+        report = inferred_integrity_report(request, sorted_candles, integrity_policy=HistoricalIntegrityPolicy.WARN)
+        return self.save_result(request, HistoricalCandleLoadResult(candles=sorted_candles, integrity_report=report))
+
     def save_result(self, request: HistoricalCandleRequest, result: HistoricalCandleLoadResult) -> Path:
         path = self.path_for(request)
         sorted_candles = self._normalized_candles(result.candles)
@@ -100,16 +255,18 @@ class HistoricalCandleFileStore:
         integrity_path = self.integrity_path_for(request)
         temporary_data_path = path.with_suffix(".jsonl.tmp")
         temporary_integrity_path = integrity_path.with_suffix(".json.tmp")
-        temporary_integrity_path.write_text(
-            json.dumps(integrity_report_to_payload(result.integrity_report), indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
+        with temporary_integrity_path.open("w", encoding="utf-8") as file:
+            file.write(json.dumps(integrity_report_to_payload(result.integrity_report), indent=2, sort_keys=True))
+            file.flush()
+            os.fsync(file.fileno())
         with temporary_data_path.open("w", encoding="utf-8") as file:
             for candle in sorted_candles:
                 payload = asdict(candle)
                 payload["timeframe"] = candle.timeframe.value
                 file.write(json.dumps(payload, sort_keys=True))
                 file.write("\n")
+            file.flush()
+            os.fsync(file.fileno())
         temporary_data_path.replace(path)
         temporary_integrity_path.replace(integrity_path)
         return path
@@ -154,6 +311,17 @@ class HistoricalCandleFileStore:
             candles.append(candle_from_payload(cast(dict[str, object], payload)))
         return tuple(sorted(candles, key=lambda candle: candle.open_time_ms))
 
+    def cleanup_temporary_files(self) -> tuple[Path, ...]:
+        """Remove incomplete atomic-write temp files left by interrupted cache writes."""
+
+        if not self._root.exists():
+            return ()
+        removed: list[Path] = []
+        for path in self._root.rglob("*.tmp"):
+            path.unlink()
+            removed.append(path)
+        return tuple(sorted(removed))
+
     def _normalized_candles(self, candles: Iterable[Candle]) -> tuple[Candle, ...]:
         candle_by_open_time = {candle.open_time_ms: candle for candle in candles}
         return tuple(candle_by_open_time[open_time] for open_time in sorted(candle_by_open_time))
@@ -168,6 +336,21 @@ class HistoricalCandleFileStore:
             or report.end_time_ms != request.end_time_ms
         ):
             raise ValueError("Historical integrity metadata does not match requested cache identity")
+
+    def _validate_no_conflicting_candles(
+        self,
+        existing: tuple[Candle, ...],
+        incoming: Iterable[Candle],
+    ) -> None:
+        existing_by_open_time = {candle.open_time_ms: candle for candle in existing}
+        for candle in incoming:
+            existing_candle = existing_by_open_time.get(candle.open_time_ms)
+            if existing_candle is not None and existing_candle != candle:
+                raise ValueError(
+                    "Historical candle cache conflict "
+                    f"symbol={candle.symbol} timeframe={candle.timeframe.value} "
+                    f"open_time_ms={candle.open_time_ms}",
+                )
 
 
 class BitMartHistoricalCandleDownloader:
@@ -184,6 +367,11 @@ class BitMartHistoricalCandleDownloader:
 
     def load(self, request: HistoricalCandleRequest) -> tuple[Candle, ...]:
         return self.load_result(request, integrity_policy=HistoricalIntegrityPolicy.STRICT).candles
+
+    def latest_completed_open_time_ms(self, symbol: str) -> int:
+        """Return latest fully closed BitMart 1m candle open time for SYNC-003."""
+
+        return self._adapter.fetch_latest_completed_candle_time(symbol)
 
     def load_result(
         self,
@@ -218,7 +406,7 @@ class BitMartHistoricalCandleDownloader:
             requested_candle_count=expected_candle_count(request),
             loaded_candle_count=len(result.candles),
         )
-        return HistoricalCandleLoadResult(candles=result.candles, integrity_report=integrity_report)
+        return HistoricalCandleLoadResult(candles=result.candles, integrity_report=integrity_report, pages=result.pages)
 
 
 def candle_from_bitmart_kline(
@@ -270,6 +458,10 @@ def expected_candle_count(request: HistoricalCandleRequest) -> int:
     return max(0, (request.end_time_ms - request.start_time_ms) // timeframe_duration_ms(request.timeframe))
 
 
+def floor_to_utc_day_ms(timestamp_ms: int) -> int:
+    return timestamp_ms - (timestamp_ms % UTC_DAY_MS)
+
+
 def exchange_request_from_historical_request(
     request: HistoricalCandleRequest,
     *,
@@ -304,13 +496,63 @@ def inferred_integrity_report(
             requested_candle_count=expected_count,
             loaded_candle_count=len(candles),
         )
+    gaps = detect_historical_gaps(request, candles)
     return HistoricalIntegrityReport.from_gaps(
         exchange_request,
-        status=HistoricalIntegrityStatus.FAILED if integrity_policy is HistoricalIntegrityPolicy.STRICT else HistoricalIntegrityStatus.INCOMPLETE,
-        gaps=(),
+        status=historical_status_for_policy(integrity_policy),
+        gaps=gaps,
         requested_candle_count=expected_count,
         loaded_candle_count=len(candles),
     )
+
+
+def detect_historical_gaps(
+    request: HistoricalCandleRequest,
+    candles: tuple[Candle, ...],
+) -> tuple[HistoricalDataGap, ...]:
+    """Return exact missing candle runs in [start_time, end_time)."""
+
+    duration_ms = timeframe_duration_ms(request.timeframe)
+    present = {candle.open_time_ms for candle in candles}
+    gaps: list[HistoricalDataGap] = []
+    current_gap: list[int] = []
+    for open_time_ms in range(request.start_time_ms, request.end_time_ms, duration_ms):
+        if open_time_ms not in present:
+            current_gap.append(open_time_ms)
+            continue
+        if current_gap:
+            gaps.append(historical_gap_from_missing_times(request, tuple(current_gap)))
+            current_gap = []
+    if current_gap:
+        gaps.append(historical_gap_from_missing_times(request, tuple(current_gap)))
+    return tuple(gaps)
+
+
+def historical_gap_from_missing_times(
+    request: HistoricalCandleRequest,
+    missing_open_times_ms: tuple[int, ...],
+) -> HistoricalDataGap:
+    duration_ms = timeframe_duration_ms(request.timeframe)
+    return HistoricalDataGap(
+        symbol=request.symbol,
+        timeframe=request.timeframe,
+        start_open_time_ms=missing_open_times_ms[0],
+        end_open_time_ms=missing_open_times_ms[-1] + duration_ms,
+        missing_candle_count=len(missing_open_times_ms),
+        missing_open_times_ms=missing_open_times_ms,
+        retry_count=0,
+        exchange=ExchangeName(request.exchange),
+        recovery_status=HistoricalGapRecoveryStatus.UNRECOVERABLE,
+        detected_at_ms=int(datetime.now(tz=UTC).timestamp() * 1000),
+    )
+
+
+def historical_status_for_policy(policy: HistoricalIntegrityPolicy) -> HistoricalIntegrityStatus:
+    if policy is HistoricalIntegrityPolicy.STRICT:
+        return HistoricalIntegrityStatus.FAILED
+    if policy is HistoricalIntegrityPolicy.WARN:
+        return HistoricalIntegrityStatus.DEGRADED
+    return HistoricalIntegrityStatus.INCOMPLETE
 
 
 def integrity_report_to_payload(report: HistoricalIntegrityReport) -> dict[str, object]:

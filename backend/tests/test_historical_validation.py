@@ -111,6 +111,77 @@ def test_historical_file_store_complete_cache_has_valid_integrity_metadata(tmp_p
     assert loaded.integrity_report.loaded_candle_count == 4
 
 
+def test_historical_file_store_persists_live_candles_into_daily_segments(tmp_path: Path) -> None:
+    store = HistoricalCandleFileStore(tmp_path)
+    candles = make_fixture_candles(count=3)
+
+    paths = store.save_daily_segments(
+        (candles[0], candles[1]),
+        exchange=ExchangeName.BITMART.value,
+        market_type=MarketType.USDT_M_PERPETUAL.value,
+    )
+    second_paths = store.save_daily_segments(
+        (candles[1], candles[2]),
+        exchange=ExchangeName.BITMART.value,
+        market_type=MarketType.USDT_M_PERPETUAL.value,
+    )
+    result = store.merged_result(
+        exchange=ExchangeName.BITMART.value,
+        market_type=MarketType.USDT_M_PERPETUAL.value,
+        symbol="BTCUSDT",
+        timeframe=Timeframe.ONE_MINUTE,
+        integrity_policy=HistoricalIntegrityPolicy.WARN,
+    )
+
+    assert paths == (tmp_path / "bitmart" / "usdt_m_perpetual" / "BTCUSDT" / "1m" / "0_86400000.jsonl",)
+    assert second_paths == paths
+    assert result is not None
+    assert result.candles == candles
+
+
+def test_historical_file_store_rejects_conflicting_daily_candle(tmp_path: Path) -> None:
+    """M31.6 reports segment conflicts instead of silently overwriting candles."""
+
+    store = HistoricalCandleFileStore(tmp_path)
+    candle = make_fixture_candles(count=1)[0]
+    conflicting = Candle(
+        symbol=candle.symbol,
+        timeframe=candle.timeframe,
+        open_time_ms=candle.open_time_ms,
+        close_time_ms=candle.close_time_ms,
+        open=candle.open,
+        high=candle.high + 10.0,
+        low=candle.low,
+        close=candle.close,
+        volume=candle.volume,
+    )
+    store.save_daily_segments(
+        (candle,),
+        exchange=ExchangeName.BITMART.value,
+        market_type=MarketType.USDT_M_PERPETUAL.value,
+    )
+
+    with pytest.raises(ValueError, match="cache conflict"):
+        store.save_daily_segments(
+            (conflicting,),
+            exchange=ExchangeName.BITMART.value,
+            market_type=MarketType.USDT_M_PERPETUAL.value,
+        )
+
+
+def test_historical_file_store_cleans_leftover_temp_files(tmp_path: Path) -> None:
+    """M31.6 allows interrupted atomic writes to be recovered on restart."""
+
+    temp_file = tmp_path / "bitmart" / "usdt_m_perpetual" / "BTCUSDT" / "1m" / "0_60000.jsonl.tmp"
+    temp_file.parent.mkdir(parents=True)
+    temp_file.write_text("partial", encoding="utf-8")
+
+    removed = HistoricalCandleFileStore(tmp_path).cleanup_temporary_files()
+
+    assert removed == (temp_file,)
+    assert not temp_file.exists()
+
+
 def test_bitmart_kline_row_normalizes_to_canonical_candle() -> None:
     """Covers M27/M31.1 BitMart candle normalization without network access."""
 

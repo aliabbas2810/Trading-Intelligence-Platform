@@ -103,6 +103,7 @@ class HistoricalDataSettings(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     integrity_policy: Literal["strict", "warn", "allow"] = "strict"
+    data_root: Path = Path("data") / "historical"
 
 
 class PlatformSettings(BaseModel):

@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from backend.models.domain import Candle, Timeframe
-from backend.pipelines.candle import ONE_MINUTE_MS
+
+
+ONE_MINUTE_MS = 60_000
 
 
 FIVE_MINUTE_MS = 5 * ONE_MINUTE_MS
@@ -42,6 +44,7 @@ class _WorkingTimeframeCandle:
     low: float
     close: float
     volume: float
+    complete_from_open: bool
 
     @classmethod
     def from_candle(
@@ -50,6 +53,8 @@ class _WorkingTimeframeCandle:
         timeframe: Timeframe,
         open_time_ms: int,
         close_time_ms: int,
+        *,
+        require_full_bucket_from_open: bool = False,
     ) -> _WorkingTimeframeCandle:
         return cls(
             symbol=candle.symbol,
@@ -61,6 +66,7 @@ class _WorkingTimeframeCandle:
             low=candle.low,
             close=candle.close,
             volume=candle.volume,
+            complete_from_open=(not require_full_bucket_from_open or candle.open_time_ms == open_time_ms),
         )
 
     def add_candle(self, candle: Candle) -> None:
@@ -83,6 +89,15 @@ class _WorkingTimeframeCandle:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class DiscardedAggregationBucket:
+    """Incomplete higher-timeframe bucket discarded at a known data gap."""
+
+    timeframe: Timeframe
+    open_time_ms: int
+    close_time_ms: int
+
+
 class TimeframeAggregator:
     """Aggregate completed 1m candles into one higher timeframe for FR-301 through FR-305."""
 
@@ -93,6 +108,7 @@ class TimeframeAggregator:
         self._timeframe = timeframe
         self._current: _WorkingTimeframeCandle | None = None
         self._last_input_close_time_ms: int | None = None
+        self._require_full_bucket_from_open = False
 
     @property
     def timeframe(self) -> Timeframe:
@@ -111,6 +127,7 @@ class TimeframeAggregator:
                 self._timeframe,
                 bucket_open_time_ms,
                 bucket_close_time_ms,
+                require_full_bucket_from_open=self._require_full_bucket_from_open,
             )
         else:
             self._validate_continuity(candle, bucket_open_time_ms)
@@ -118,11 +135,29 @@ class TimeframeAggregator:
 
         self._last_input_close_time_ms = candle.close_time_ms
         if candle.close_time_ms == bucket_close_time_ms:
-            completed = self._current.finalize()
+            completed = self._current.finalize() if self._current.complete_from_open else None
             self._current = None
+            self._require_full_bucket_from_open = False
             return completed
 
         return None
+
+    def reset_for_discontinuity(self) -> DiscardedAggregationBucket | None:
+        """Discard the current incomplete bucket before starting a new replay segment."""
+
+        if self._current is None:
+            self._last_input_close_time_ms = None
+            self._require_full_bucket_from_open = True
+            return None
+        discarded = DiscardedAggregationBucket(
+            timeframe=self._current.timeframe,
+            open_time_ms=self._current.open_time_ms,
+            close_time_ms=self._current.close_time_ms,
+        )
+        self._current = None
+        self._last_input_close_time_ms = None
+        self._require_full_bucket_from_open = True
+        return discarded
 
     def _validate_input_candle(self, candle: Candle) -> None:
         if candle.timeframe is not Timeframe.ONE_MINUTE:

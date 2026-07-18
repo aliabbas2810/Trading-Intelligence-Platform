@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
@@ -42,11 +43,19 @@ LOCAL_FRONTEND_ORIGINS = (
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     runtime = runtime_from_app(app)
     if runtime.state is not RuntimeState.RUNNING:
-        runtime.start()
+        if runtime.requires_background_initialization:
+            app.state.runtime_start_task = asyncio.create_task(_start_runtime_in_background(runtime))
+        else:
+            runtime.start()
     try:
         yield
     finally:
-        if runtime.state is RuntimeState.RUNNING:
+        start_task = getattr(app.state, "runtime_start_task", None)
+        if isinstance(start_task, asyncio.Task):
+            runtime.stop()
+            with suppress(asyncio.CancelledError):
+                await start_task
+        elif runtime.state in {RuntimeState.RUNNING, RuntimeState.STARTING, RuntimeState.FAILED}:
             runtime.stop()
 
 
@@ -461,6 +470,16 @@ def runtime_from_app(app: FastAPI) -> BackendRuntime:
     if not isinstance(runtime, BackendRuntime):
         raise RuntimeError("FastAPI app state does not contain BackendRuntime")
     return runtime
+
+
+async def _start_runtime_in_background(runtime: BackendRuntime) -> None:
+    """Start long-running live initialization without blocking API availability."""
+
+    try:
+        await asyncio.to_thread(runtime.start)
+    except Exception as exc:  # pragma: no cover - exercised through health surface.
+        if runtime.state is not RuntimeState.FAILED:
+            runtime.record_startup_failure(exc)
 
 
 def _validate_bounded_read_request(

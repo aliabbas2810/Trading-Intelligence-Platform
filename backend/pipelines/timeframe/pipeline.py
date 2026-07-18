@@ -3,7 +3,11 @@ from __future__ import annotations
 from backend.core import EventBus, get_logger
 from backend.models.domain import Candle, Timeframe
 from backend.pipelines.candle import CandleClosedEvent
-from backend.pipelines.timeframe.aggregation import AGGREGATED_TIMEFRAMES, TimeframeAggregator
+from backend.pipelines.timeframe.aggregation import (
+    AGGREGATED_TIMEFRAMES,
+    DiscardedAggregationBucket,
+    TimeframeAggregator,
+)
 from backend.pipelines.timeframe.events import TimeframeCandleClosedEvent
 from backend.storage import CandleStore
 
@@ -33,6 +37,16 @@ class TimeframePipeline:
             TimeframeAggregator(aggregator.timeframe) for aggregator in self._aggregators
         )
 
+    def reset_for_discontinuity(self) -> tuple[DiscardedAggregationBucket, ...]:
+        """Discard open buckets at accepted historical gaps without emitting candles."""
+
+        discarded: list[DiscardedAggregationBucket] = []
+        for aggregator in self._aggregators:
+            bucket = aggregator.reset_for_discontinuity()
+            if bucket is not None:
+                discarded.append(bucket)
+        return tuple(discarded)
+
     def handle_one_minute_candle(self, candle: Candle) -> tuple[Candle, ...]:
         completed: list[Candle] = []
         for aggregator in self._aggregators:
@@ -41,7 +55,7 @@ class TimeframePipeline:
                 continue
 
             self._store.save(higher_timeframe_candle)
-            self._logger.info("Closed higher-timeframe candle")
+            self._logger.debug("Closed higher-timeframe candle")
             self._event_bus.publish(TimeframeCandleClosedEvent(candle=higher_timeframe_candle))
             completed.append(higher_timeframe_candle)
 
