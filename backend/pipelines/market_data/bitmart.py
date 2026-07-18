@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Protocol, cast
+from urllib.parse import urlparse
 
 from backend.core import EventBus
 from backend.models.domain import Trade
@@ -19,6 +21,7 @@ from backend.pipelines.market_data.events import (
 BITMART_SOURCE = "bitmart_usdt_m_perpetual"
 BITMART_FUTURES_PUBLIC_WS_URL = "wss://openapi-ws-v2.bitmart.com/api?protocol=1.1"
 BITMART_FUTURES_TRADE_CHANNEL = "futures/trade"
+LOGGER = logging.getLogger(__name__)
 
 
 class EventBusMarketDataPipeline:
@@ -200,7 +203,7 @@ class BitMartTradeStreamClient:
             )
             self._publish_status(MarketDataConnectionStatus.CONNECTING, "connecting", attempt)
             try:
-                await self._run_once()
+                await self._run_once(attempt=attempt)
                 if not self._stop_requested:
                     self._publish_status(MarketDataConnectionStatus.DISCONNECTED, "disconnected", attempt)
             except Exception as exc:  # pragma: no cover - exercised through deterministic fakes
@@ -217,26 +220,64 @@ class BitMartTradeStreamClient:
             self._publish_status(MarketDataConnectionStatus.RECONNECTING, "reconnecting", attempt)
             await asyncio.sleep(self._config.reconnect_delay_seconds)
 
-    async def _run_once(self) -> None:
+    async def _run_once(self, *, attempt: int) -> None:
         connector = self._connector
         if connector is None:
             import websockets
 
             connector = websockets.connect
-        async with connector(self._config.websocket_url) as websocket:
-            self._diagnostics = replace_diagnostics(
-                self._diagnostics,
-                connected=True,
-                connected_at_ms=self._clock_ms(),
+        hostname = urlparse(self._config.websocket_url).hostname
+        LOGGER.info(
+            "BitMart WebSocket connection attempt starting",
+            extra={
+                "operation": "bitmart_websocket_connect",
+                "websocket_uri": self._config.websocket_url,
+                "parsed_hostname": hostname,
+                "retry_attempt": attempt,
+                "thread_name": threading.current_thread().name,
+                "stop_requested": self._stop_requested,
+            },
+        )
+        try:
+            websocket_context = connector(self._config.websocket_url)
+            async with websocket_context as websocket:
+                LOGGER.info(
+                    "BitMart WebSocket connection opened",
+                    extra={
+                        "operation": "bitmart_websocket_connect",
+                        "websocket_uri": self._config.websocket_url,
+                        "parsed_hostname": hostname,
+                        "retry_attempt": attempt,
+                        "thread_name": threading.current_thread().name,
+                        "stop_requested": self._stop_requested,
+                    },
+                )
+                self._diagnostics = replace_diagnostics(
+                    self._diagnostics,
+                    connected=True,
+                    connected_at_ms=self._clock_ms(),
+                )
+                await websocket.send(self._parser.subscribe_payload())
+                while not self._stop_requested:
+                    try:
+                        message = await asyncio.wait_for(websocket.recv(), timeout=self._config.heartbeat_seconds)
+                    except TimeoutError:
+                        await websocket.send('{"action":"ping"}')
+                        continue
+                    self.handle_text_message(message)
+        except Exception:
+            LOGGER.exception(
+                "BitMart WebSocket connection failed",
+                extra={
+                    "operation": "bitmart_websocket_connect",
+                    "websocket_uri": self._config.websocket_url,
+                    "parsed_hostname": hostname,
+                    "retry_attempt": attempt,
+                    "thread_name": threading.current_thread().name,
+                    "stop_requested": self._stop_requested,
+                },
             )
-            await websocket.send(self._parser.subscribe_payload())
-            while not self._stop_requested:
-                try:
-                    message = await asyncio.wait_for(websocket.recv(), timeout=self._config.heartbeat_seconds)
-                except TimeoutError:
-                    await websocket.send('{"action":"ping"}')
-                    continue
-                self.handle_text_message(message)
+            raise
 
     def publish_trade(self, trade: Trade) -> None:
         """Publish an injected canonical BitMart trade without parsing exchange DTOs."""

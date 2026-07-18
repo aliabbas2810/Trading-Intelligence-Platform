@@ -5,12 +5,13 @@ from backend.pipelines.candle.builder import (
     OneMinuteCandleBuilder,
     floor_to_minute_ms,
 )
-from backend.pipelines.candle.events import CandleClosedEvent
+from backend.pipelines.candle.events import CandleClosedEvent, CandleEventSource
 from backend.pipelines.candle.pipeline import OneMinuteCandlePipeline
 
 __all__ = [
     "ONE_MINUTE_MS",
     "CandleClosedEvent",
+    "CandleEventSource",
     "ClosedCandle",
     "LateTradeError",
     "OneMinuteCandleBuilder",

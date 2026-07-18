@@ -136,6 +136,9 @@ class HistoricalIntegrityReport:
     timeframe: Timeframe
     start_time_ms: int
     end_time_ms: int
+    exchange_candle_count: int = 0
+    synthetic_candle_count: int = 0
+    canonical_candle_count: int = 0
 
     @classmethod
     def valid(
@@ -144,7 +147,12 @@ class HistoricalIntegrityReport:
         *,
         requested_candle_count: int,
         loaded_candle_count: int,
+        exchange_candle_count: int | None = None,
+        synthetic_candle_count: int = 0,
+        canonical_candle_count: int | None = None,
     ) -> HistoricalIntegrityReport:
+        final_exchange_count = loaded_candle_count if exchange_candle_count is None else exchange_candle_count
+        final_canonical_count = loaded_candle_count if canonical_candle_count is None else canonical_candle_count
         return cls(
             policy=request.integrity_policy,
             status=HistoricalIntegrityStatus.VALID,
@@ -160,6 +168,9 @@ class HistoricalIntegrityReport:
             timeframe=request.timeframe,
             start_time_ms=request.start_time_ms,
             end_time_ms=request.end_time_ms,
+            exchange_candle_count=final_exchange_count,
+            synthetic_candle_count=synthetic_candle_count,
+            canonical_candle_count=final_canonical_count,
         )
 
     @classmethod
@@ -171,7 +182,12 @@ class HistoricalIntegrityReport:
         gaps: tuple[HistoricalDataGap, ...],
         requested_candle_count: int,
         loaded_candle_count: int,
+        exchange_candle_count: int | None = None,
+        synthetic_candle_count: int = 0,
+        canonical_candle_count: int | None = None,
     ) -> HistoricalIntegrityReport:
+        final_exchange_count = loaded_candle_count if exchange_candle_count is None else exchange_candle_count
+        final_canonical_count = loaded_candle_count if canonical_candle_count is None else canonical_candle_count
         return cls(
             policy=request.integrity_policy,
             status=status,
@@ -187,6 +203,9 @@ class HistoricalIntegrityReport:
             timeframe=request.timeframe,
             start_time_ms=request.start_time_ms,
             end_time_ms=request.end_time_ms,
+            exchange_candle_count=final_exchange_count,
+            synthetic_candle_count=synthetic_candle_count,
+            canonical_candle_count=final_canonical_count,
         )
 
 

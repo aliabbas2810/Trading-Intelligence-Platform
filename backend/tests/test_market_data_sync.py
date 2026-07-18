@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -23,7 +24,7 @@ from backend.exchange import (
     RateLimitMetadata,
     RetryPolicy,
 )
-from backend.exchange.bitmart import HistoricalDataGapError
+from backend.exchange.bitmart import LATEST_AVAILABLE_PROBE_CANDLE_COUNT, HistoricalDataGapError
 from backend.engines.historical import HistoricalHorizon
 from backend.models import Candle, Timeframe
 from backend.storage import InMemoryCandleHistoryStore, JsonlCandleHistoryStore
@@ -100,6 +101,75 @@ class EmptyKlineTransport(FakeTransport):
         if path.endswith("/details"):
             return super().get_json(path, params)
         return {"data": {"klines": []}}
+
+
+class LaggingKlineTransport(FakeTransport):
+    def __init__(self, *, latest_available_open_time_ms: int) -> None:
+        super().__init__()
+        self.latest_available_s = latest_available_open_time_ms // 1000
+
+    def get_json(self, path: str, params: dict[str, str | int]) -> object:
+        payload = super().get_json(path, params)
+        if path.endswith("/details"):
+            return payload
+        if isinstance(payload, dict):
+            data = payload.get("data")
+            if isinstance(data, dict):
+                rows = data.get("klines")
+                if isinstance(rows, list):
+                    data["klines"] = [
+                        row
+                        for row in rows
+                        if isinstance(row, dict) and int(str(row.get("timestamp", -1))) <= self.latest_available_s
+                    ]
+        return payload
+
+
+class InProgressKlineTransport(FakeTransport):
+    def get_json(self, path: str, params: dict[str, str | int]) -> object:
+        payload = super().get_json(path, params)
+        if path.endswith("/details"):
+            return payload
+        if isinstance(payload, dict):
+            data = payload.get("data")
+            if isinstance(data, dict):
+                rows = data.get("klines")
+                if isinstance(rows, list):
+                    rows.append(
+                        {
+                            "timestamp": int(params["end_time"]) + 60,
+                            "open": "100",
+                            "high": "110",
+                            "low": "90",
+                            "close": "105",
+                            "volume": "1",
+                        }
+                    )
+        return payload
+
+
+class FailingKlineTransport(FakeTransport):
+    def get_json(self, path: str, params: dict[str, str | int]) -> object:
+        self.calls.append((path, params))
+        if path.endswith("/details"):
+            return super().get_json(path, params)
+        raise RuntimeError("temporary probe failure")
+
+
+class FreshTailEmptyTransport(FakeTransport):
+    def __init__(self, *, empty_start_time_ms: int) -> None:
+        super().__init__()
+        self.empty_start_s = empty_start_time_ms // 1000
+        self.kline_calls = 0
+
+    def get_json(self, path: str, params: dict[str, str | int]) -> object:
+        if path.endswith("/details"):
+            return super().get_json(path, params)
+        self.kline_calls += 1
+        if self.kline_calls > 1 and int(params["start_time"]) >= self.empty_start_s:
+            self.calls.append((path, params))
+            return {"data": {"klines": []}}
+        return FakeTransport.get_json(self, path, params)
 
 
 class GapKlineTransport(FakeTransport):
@@ -217,6 +287,71 @@ def test_bitmart_historical_pagination_deduplicates_and_excludes_forming_candle(
     assert result.pages >= 2
 
 
+def test_bitmart_latest_probe_returns_newest_available_closed_candle() -> None:
+    transport = FakeTransport()
+    adapter = BitMartFuturesMarketDataAdapter(transport=transport, clock_ms=lambda: 10 * 60_000)
+
+    latest = adapter.fetch_latest_completed_candle_time("BTCUSDT")
+
+    assert latest == 9 * 60_000
+    probe_calls = all_kline_calls_from(transport)
+    assert probe_calls[-1]["start_time"] == 0
+    assert probe_calls[-1]["end_time"] == 10 * 60
+    assert probe_calls[-1]["limit"] == LATEST_AVAILABLE_PROBE_CANDLE_COUNT
+
+
+def test_bitmart_latest_probe_excludes_in_progress_candle() -> None:
+    adapter = BitMartFuturesMarketDataAdapter(
+        transport=InProgressKlineTransport(),
+        clock_ms=lambda: 10 * 60_000,
+    )
+
+    assert adapter.fetch_latest_completed_candle_time("BTCUSDT") == 9 * 60_000
+
+
+def test_bitmart_latest_probe_accepts_one_candle_exchange_lag() -> None:
+    adapter = BitMartFuturesMarketDataAdapter(
+        transport=LaggingKlineTransport(latest_available_open_time_ms=8 * 60_000),
+        clock_ms=lambda: 10 * 60_000,
+    )
+
+    assert adapter.fetch_latest_completed_candle_time("BTCUSDT") == 8 * 60_000
+
+
+def test_bitmart_latest_probe_accepts_multiple_candle_exchange_lag() -> None:
+    adapter = BitMartFuturesMarketDataAdapter(
+        transport=LaggingKlineTransport(latest_available_open_time_ms=5 * 60_000),
+        clock_ms=lambda: 10 * 60_000,
+    )
+
+    assert adapter.fetch_latest_completed_candle_time("BTCUSDT") == 5 * 60_000
+
+
+def test_bitmart_latest_probe_failure_uses_conservative_fallback(caplog: pytest.LogCaptureFixture) -> None:
+    adapter = BitMartFuturesMarketDataAdapter(
+        transport=FailingKlineTransport(),
+        retry_policy=RetryPolicy(max_attempts=1),
+        clock_ms=lambda: 10 * 60_000,
+    )
+
+    with caplog.at_level(logging.ERROR, logger="backend.exchange.bitmart"):
+        assert adapter.fetch_latest_completed_candle_time("BTCUSDT") == 8 * 60_000
+
+    assert any(
+        getattr(record, "operation", None) == "bitmart_latest_candle_probe"
+        and getattr(record, "exception_type", None) == "RuntimeError"
+        and record.exc_info is not None
+        for record in caplog.records
+    )
+    assert any(
+        getattr(record, "operation", None) == "bitmart_historical_rest_request"
+        and getattr(record, "method", None) == "GET"
+        and record.exc_info is not None
+        for record in caplog.records
+    )
+    assert "User-Agent" not in caplog.text
+
+
 def test_bitmart_short_historical_range_uses_one_bounded_page() -> None:
     transport = FakeTransport()
     adapter = BitMartFuturesMarketDataAdapter(
@@ -318,7 +453,7 @@ def test_bitmart_pagination_is_timeframe_aware_for_five_minute_candles() -> None
     assert result.candles[-1].open_time_ms == 20 * 60_000
 
 
-def test_bitmart_recovers_narrow_missing_interval_without_synthesizing_candles() -> None:
+def test_bitmart_sparse_historical_gap_generates_zero_volume_no_trade_candles() -> None:
     transport = RecoverableGapKlineTransport(gap_start_ms=5 * 60_000, gap_end_ms=10 * 60_000)
     adapter = BitMartFuturesMarketDataAdapter(
         transport=transport,
@@ -331,9 +466,36 @@ def test_bitmart_recovers_narrow_missing_interval_without_synthesizing_candles()
 
     kline_calls = kline_calls_from(transport)
     assert len(result.candles) == 20
-    assert result.pages == 2
     assert [candle.open_time_ms for candle in result.candles] == list(range(0, 20 * 60_000, 60_000))
-    assert any(call["start_time"] == 5 * 60 and call["end_time"] == 10 * 60 for call in kline_calls)
+    synthetic = result.candles[5:10]
+    assert all(candle.source_kind == "synthetic_no_trade" for candle in synthetic)
+    assert all(candle.volume == 0 for candle in synthetic)
+    assert all(candle.open == candle.high == candle.low == candle.close == result.candles[4].close for candle in synthetic)
+    assert result.integrity_report is not None
+    assert result.integrity_report.complete
+    assert result.integrity_report.exchange_candle_count == 15
+    assert result.integrity_report.synthetic_candle_count == 5
+    assert result.integrity_report.canonical_candle_count == 20
+    assert not any(call["start_time"] == 5 * 60 and call["end_time"] == 10 * 60 for call in kline_calls)
+
+
+def test_bitmart_exact_confirmed_sparse_gap_request_returns_synthetic_candles() -> None:
+    adapter = BitMartFuturesMarketDataAdapter(
+        transport=GapKlineTransport(gap_start_ms=5 * 60_000, gap_end_ms=7 * 60_000),
+        page_size=500,
+        clock_ms=lambda: 30 * 60_000,
+    )
+    request = historical_request(start=5 * 60_000, end=7 * 60_000, limit=500)
+
+    result = adapter.fetch_historical_candles(request)
+
+    assert [candle.open_time_ms for candle in result.candles] == [5 * 60_000, 6 * 60_000]
+    assert all(candle.source_kind == "synthetic_no_trade" for candle in result.candles)
+    assert all(candle.volume == 0 for candle in result.candles)
+    assert result.integrity_report is not None
+    assert result.integrity_report.exchange_candle_count == 0
+    assert result.integrity_report.synthetic_candle_count == 2
+    assert result.integrity_report.canonical_candle_count == 2
 
 
 def test_bitmart_recovery_deduplicates_and_sorts_retry_rows() -> None:
@@ -351,7 +513,7 @@ def test_bitmart_recovery_deduplicates_and_sorts_retry_rows() -> None:
     assert [candle.open_time_ms for candle in result.candles] == list(range(0, 20 * 60_000, 60_000))
 
 
-def test_bitmart_rejects_persistent_non_contiguous_data_after_bounded_recovery() -> None:
+def test_bitmart_successful_sparse_context_does_not_require_gap_recovery() -> None:
     transport = GapKlineTransport(gap_start_ms=5 * 60_000, gap_end_ms=10 * 60_000)
     sleeps: list[float] = []
     adapter = BitMartFuturesMarketDataAdapter(
@@ -364,19 +526,16 @@ def test_bitmart_rejects_persistent_non_contiguous_data_after_bounded_recovery()
     )
     request = historical_request(start=0, end=20 * 60_000, limit=500)
 
-    with pytest.raises(HistoricalDataGapError) as exc_info:
-        adapter.fetch_historical_candles(request)
+    result = adapter.fetch_historical_candles(request)
 
-    message = str(exc_info.value)
-    assert "missing_start_time_ms=300000" in message
-    assert "missing_end_time_ms=600000" in message
-    assert "retry_count=2" in message
-    assert sleeps == [0.1]
-    kline_calls = kline_calls_from(transport)
-    assert sum(1 for call in kline_calls if call["start_time"] == 5 * 60 and call["end_time"] == 10 * 60) == 2
+    assert len(result.candles) == 20
+    assert sum(1 for candle in result.candles if candle.source_kind == "synthetic_no_trade") == 5
+    assert sleeps == []
+    assert result.integrity_report is not None
+    assert result.integrity_report.status is HistoricalIntegrityStatus.VALID
 
 
-def test_bitmart_warn_policy_returns_available_candles_and_degraded_report() -> None:
+def test_bitmart_warn_policy_returns_canonical_complete_report_after_sparse_normalization() -> None:
     transport = GapKlineTransport(gap_start_ms=5 * 60_000, gap_end_ms=10 * 60_000)
     adapter = BitMartFuturesMarketDataAdapter(
         transport=transport,
@@ -394,18 +553,19 @@ def test_bitmart_warn_policy_returns_available_candles_and_degraded_report() -> 
 
     result = adapter.fetch_historical_candles(request)
 
-    assert len(result.candles) == 15
-    assert {candle.open_time_ms for candle in result.candles}.isdisjoint(set(range(5 * 60_000, 10 * 60_000, 60_000)))
+    assert len(result.candles) == 20
+    assert {candle.open_time_ms for candle in result.candles}.issuperset(set(range(5 * 60_000, 10 * 60_000, 60_000)))
     assert result.integrity_report is not None
-    assert result.integrity_report.status is HistoricalIntegrityStatus.DEGRADED
-    assert result.integrity_report.complete is False
+    assert result.integrity_report.status is HistoricalIntegrityStatus.VALID
+    assert result.integrity_report.complete is True
     assert result.integrity_report.requested_candle_count == 20
-    assert result.integrity_report.loaded_candle_count == 15
-    assert result.integrity_report.total_missing_candles == 5
-    assert result.integrity_report.gaps[0].missing_open_times_ms == tuple(range(5 * 60_000, 10 * 60_000, 60_000))
+    assert result.integrity_report.loaded_candle_count == 20
+    assert result.integrity_report.total_missing_candles == 0
+    assert result.integrity_report.gaps == ()
+    assert result.integrity_report.synthetic_candle_count == 5
 
 
-def test_bitmart_allow_policy_returns_available_candles_and_incomplete_report() -> None:
+def test_bitmart_allow_policy_returns_canonical_complete_report_after_sparse_normalization() -> None:
     adapter = BitMartFuturesMarketDataAdapter(
         transport=GapKlineTransport(gap_start_ms=5 * 60_000, gap_end_ms=10 * 60_000),
         page_size=500,
@@ -422,10 +582,11 @@ def test_bitmart_allow_policy_returns_available_candles_and_incomplete_report() 
 
     result = adapter.fetch_historical_candles(request)
 
-    assert len(result.candles) == 15
+    assert len(result.candles) == 20
     assert result.integrity_report is not None
-    assert result.integrity_report.status is HistoricalIntegrityStatus.INCOMPLETE
-    assert result.integrity_report.gap_count == 1
+    assert result.integrity_report.status is HistoricalIntegrityStatus.VALID
+    assert result.integrity_report.gap_count == 0
+    assert result.integrity_report.synthetic_candle_count == 5
 
 
 def test_bitmart_complete_data_has_valid_integrity_report_for_warn_policy() -> None:
@@ -464,6 +625,49 @@ def test_bitmart_empty_historical_page_reports_exact_window() -> None:
     assert "zero candles" in message
     assert "page_start_time_ms=0" in message
     assert "page_end_time_ms=300000" in message
+
+
+def test_bitmart_warn_policy_treats_freshest_tail_zero_page_as_unavailable() -> None:
+    adapter = BitMartFuturesMarketDataAdapter(
+        transport=FreshTailEmptyTransport(empty_start_time_ms=8 * 60_000),
+        page_size=500,
+        clock_ms=lambda: 10 * 60_000,
+        max_gap_recovery_attempts=1,
+        gap_recovery_backoff_seconds=0.0,
+    )
+    request = historical_request(
+        start=8 * 60_000,
+        end=10 * 60_000,
+        limit=500,
+        integrity_policy=HistoricalIntegrityPolicy.WARN,
+    )
+
+    result = adapter.fetch_historical_candles(request)
+
+    assert result.candles == ()
+    assert result.integrity_report is not None
+    assert result.integrity_report.status is HistoricalIntegrityStatus.DEGRADED
+    assert result.integrity_report.complete is False
+    assert result.integrity_report.gaps[0].missing_open_times_ms == (8 * 60_000, 9 * 60_000)
+
+
+def test_bitmart_strict_policy_fails_when_freshest_tail_remains_unavailable() -> None:
+    adapter = BitMartFuturesMarketDataAdapter(
+        transport=FreshTailEmptyTransport(empty_start_time_ms=8 * 60_000),
+        page_size=500,
+        clock_ms=lambda: 10 * 60_000,
+        max_gap_recovery_attempts=1,
+        gap_recovery_backoff_seconds=0.0,
+    )
+    request = historical_request(
+        start=8 * 60_000,
+        end=10 * 60_000,
+        limit=500,
+        integrity_policy=HistoricalIntegrityPolicy.STRICT,
+    )
+
+    with pytest.raises(HistoricalDataGapError):
+        adapter.fetch_historical_candles(request)
 
 
 def test_bitmart_pagination_rejects_non_advancing_cursor() -> None:
@@ -775,6 +979,19 @@ def historical_request(
 
 
 def kline_calls_from(transport: FakeTransport) -> list[dict[str, str | int]]:
+    return [
+        params
+        for path, params in transport.calls
+        if path.endswith("/kline")
+        and not (
+            int(params.get("limit", 0)) == LATEST_AVAILABLE_PROBE_CANDLE_COUNT
+            and int(params.get("step", 0)) == 1
+            and int(params["end_time"]) - int(params["start_time"]) <= LATEST_AVAILABLE_PROBE_CANDLE_COUNT * 60
+        )
+    ]
+
+
+def all_kline_calls_from(transport: FakeTransport) -> list[dict[str, str | int]]:
     return [params for path, params in transport.calls if path.endswith("/kline")]
 
 

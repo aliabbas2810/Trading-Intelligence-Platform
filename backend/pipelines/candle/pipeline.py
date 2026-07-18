@@ -5,7 +5,7 @@ from collections.abc import Iterable
 from backend.core import EventBus, get_logger
 from backend.models.domain import Trade
 from backend.pipelines.candle.builder import ClosedCandle, OneMinuteCandleBuilder
-from backend.pipelines.candle.events import CandleClosedEvent
+from backend.pipelines.candle.events import CandleClosedEvent, CandleEventSource
 from backend.pipelines.market_data import TradeReceivedEvent
 from backend.storage.candles import CandleStore
 
@@ -52,5 +52,6 @@ class OneMinuteCandlePipeline:
                 CandleClosedEvent(
                     candle=closed.candle,
                     is_synthetic=closed.is_synthetic,
+                    source=CandleEventSource.LIVE_STREAM,
                 ),
             )

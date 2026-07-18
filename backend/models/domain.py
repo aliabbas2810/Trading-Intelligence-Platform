@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from math import isfinite
+from typing import Literal
 
 
 class Timeframe(str, Enum):
@@ -55,6 +56,7 @@ class Candle:
     low: float
     close: float
     volume: float
+    source_kind: Literal["exchange", "synthetic_no_trade"] = "exchange"
 
     def __post_init__(self) -> None:
         """Validate completed candle integrity for FR-201 through FR-204."""
@@ -73,6 +75,8 @@ class Candle:
                 raise ValueError(f"Candle {field_name} must be positive and finite")
         if not isfinite(self.volume) or self.volume < 0:
             raise ValueError("Candle volume must be non-negative and finite")
+        if self.source_kind not in {"exchange", "synthetic_no_trade"}:
+            raise ValueError("Candle source_kind must be exchange or synthetic_no_trade")
         if self.high < max(self.open, self.close):
             raise ValueError("Candle high must be at least open and close")
         if self.low > min(self.open, self.close):

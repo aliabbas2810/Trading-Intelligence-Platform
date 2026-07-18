@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import logging
+
+import pytest
+
 from backend.core import EventBus
 from backend.models import Trade
 from backend.pipelines.market_data import (
@@ -125,3 +129,50 @@ def test_bitmart_client_ack_malformed_and_duplicate_trade_handling() -> None:
     assert client.diagnostics.subscription_acknowledged is True
     assert client.diagnostics.duplicate_trade_count == 1
     assert client.diagnostics.malformed_trade_count == 1
+
+
+@pytest.mark.asyncio
+async def test_bitmart_websocket_failure_logs_diagnostics_and_reconnects(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    event_bus = EventBus()
+    statuses: list[MarketDataStatusEvent] = []
+    event_bus.subscribe(MarketDataStatusEvent, statuses.append)
+
+    class FailingConnector:
+        def __init__(self) -> None:
+            self.uris: list[str] = []
+
+        def __call__(self, uri: str) -> object:
+            self.uris.append(uri)
+            return self
+
+        async def __aenter__(self) -> object:
+            raise OSError("websocket dns failure")
+
+        async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
+            return None
+
+    connector = FailingConnector()
+    client = BitMartTradeStreamClient(
+        config=BitMartTradeStreamClientConfig(
+            symbol="BTCUSDT",
+            reconnect_delay_seconds=0.0,
+            max_reconnect_attempts=2,
+        ),
+        event_bus=event_bus,
+        connector=connector,
+    )
+
+    with caplog.at_level(logging.ERROR, logger="backend.pipelines.market_data.bitmart"):
+        await client.run_forever()
+
+    assert len(connector.uris) == 2
+    assert [status.status for status in statuses].count(MarketDataConnectionStatus.ERROR) == 2
+    assert any(status.status is MarketDataConnectionStatus.RECONNECTING for status in statuses)
+    assert any(
+        getattr(record, "operation", None) == "bitmart_websocket_connect"
+        and getattr(record, "parsed_hostname", None) == "openapi-ws-v2.bitmart.com"
+        and record.exc_info is not None
+        for record in caplog.records
+    )
