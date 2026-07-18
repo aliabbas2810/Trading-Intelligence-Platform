@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,7 @@ from backend.exchange import (
     RetryPolicy,
 )
 from backend.exchange.bitmart import HistoricalDataGapError
+from backend.engines.historical import HistoricalHorizon
 from backend.models import Candle, Timeframe
 from backend.storage import InMemoryCandleHistoryStore, JsonlCandleHistoryStore
 from backend.sync import (
@@ -597,6 +599,23 @@ def test_planner_fresh_existing_current_and_gap_repair() -> None:
     assert gap_plan.jobs[0].reason.value == "gap_repair"
 
 
+def test_incremental_sync_planner_uses_shared_calendar_horizon_floor() -> None:
+    planner = IncrementalSyncPlanner(
+        history_store=InMemoryCandleHistoryStore(),
+        exchange=ExchangeName.BITMART,
+        market_type=MarketType.USDT_M_PERPETUAL,
+        history_horizon=HistoricalHorizon(years=1),
+    )
+
+    plan = planner.plan_symbol(
+        contract=contract(),
+        latest_remote_completed_open_time_ms=utc_ms(2025, 1, 1, 0, 0),
+        now_ms=utc_ms(2025, 1, 1, 0, 0),
+    )
+
+    assert plan.jobs[0].interval.start_time_ms == utc_ms(2024, 1, 1, 0, 0)
+
+
 def test_sqlite_metadata_persists_checkpoint(tmp_path: Path) -> None:
     store = SQLiteSyncMetadataStore(tmp_path / "sync.sqlite3")
     status = sync_status()
@@ -767,6 +786,10 @@ def planner_for(store: InMemoryCandleHistoryStore) -> IncrementalSyncPlanner:
         market_type=MarketType.USDT_M_PERPETUAL,
         priority_symbols=("BTCUSDT",),
     )
+
+
+def utc_ms(year: int, month: int, day: int, hour: int, minute: int) -> int:
+    return int(datetime(year, month, day, hour, minute, tzinfo=UTC).timestamp() * 1000)
 
 
 def contract(symbol: str = "BTCUSDT") -> ContractMetadata:

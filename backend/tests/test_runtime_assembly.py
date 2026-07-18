@@ -473,6 +473,113 @@ def test_live_startup_discovers_cache_and_fetches_only_missing_closed_candles(tm
     assert runner.started
 
 
+def test_live_startup_backfills_cache_prefix_when_existing_cache_starts_too_recently(tmp_path: Path) -> None:
+    """M31.6.2 startup must not accept a partial cache as the replay baseline."""
+
+    cached_request = HistoricalCandleRequest(
+        symbol="BTCUSDT",
+        timeframe=Timeframe.ONE_MINUTE,
+        start_time_ms=120_000,
+        end_time_ms=300_000,
+    )
+    HistoricalCandleFileStore(tmp_path).save(
+        cached_request,
+        tuple(candle_for_open_time("BTCUSDT", open_time_ms) for open_time_ms in (120_000, 180_000, 240_000)),
+    )
+    downloader = FakeLiveCatchupDownloader(latest_completed_open_time_ms=240_000)
+
+    runtime = BackendRuntime(
+        settings=live_enabled_settings(data_root=tmp_path),
+        mode=RuntimeMode.LIVE_BITMART,
+        live_stream_runner_factory=lambda client: RecordingLiveStreamRunner().bind(client),
+        historical_downloader=downloader,
+    )
+
+    runtime.start()
+    components = {component.name: component for component in runtime.health().components}
+    candles = runtime.visualization_api.get_candles("BTCUSDT", Timeframe.ONE_MINUTE)
+
+    assert downloader.requests == [(0, 120_000)]
+    assert [candle.open_time_ms for candle in candles] == [0, 60_000, 120_000, 180_000, 240_000]
+    assert components["required_history_start_time_ms"].message == "0"
+    assert components["required_history_end_time_ms"].message == "300000"
+    assert components["replay_start_time_ms"].message == "0"
+    assert components["replay_end_time_ms"].message == "300000"
+
+
+def test_live_startup_repairs_internal_cache_gap_before_replay(tmp_path: Path) -> None:
+    """M31.6.2 planned windows include internal gaps, not only tail catch-up."""
+
+    store = HistoricalCandleFileStore(tmp_path)
+    store.save(
+        HistoricalCandleRequest(
+            symbol="BTCUSDT",
+            timeframe=Timeframe.ONE_MINUTE,
+            start_time_ms=0,
+            end_time_ms=120_000,
+        ),
+        tuple(candle_for_open_time("BTCUSDT", open_time_ms) for open_time_ms in (0, 60_000)),
+    )
+    store.save(
+        HistoricalCandleRequest(
+            symbol="BTCUSDT",
+            timeframe=Timeframe.ONE_MINUTE,
+            start_time_ms=180_000,
+            end_time_ms=300_000,
+        ),
+        tuple(candle_for_open_time("BTCUSDT", open_time_ms) for open_time_ms in (180_000, 240_000)),
+    )
+    downloader = FakeLiveCatchupDownloader(latest_completed_open_time_ms=240_000)
+
+    runtime = BackendRuntime(
+        settings=live_enabled_settings(data_root=tmp_path),
+        mode=RuntimeMode.LIVE_BITMART,
+        live_stream_runner_factory=lambda client: RecordingLiveStreamRunner().bind(client),
+        historical_downloader=downloader,
+    )
+
+    runtime.start()
+    candles = runtime.visualization_api.get_candles("BTCUSDT", Timeframe.ONE_MINUTE)
+
+    assert downloader.requests == [(120_000, 180_000)]
+    assert [candle.open_time_ms for candle in candles] == [0, 60_000, 120_000, 180_000, 240_000]
+    complete_cache_integrity = runtime.health().complete_cache_integrity
+    assert complete_cache_integrity is not None
+    assert complete_cache_integrity.complete
+
+
+def test_live_startup_with_complete_cache_only_downloads_new_tail_on_next_startup(tmp_path: Path) -> None:
+    """M31.6.2 repeated startup reuses the complete window and avoids full redownload."""
+
+    cached_request = HistoricalCandleRequest(
+        symbol="BTCUSDT",
+        timeframe=Timeframe.ONE_MINUTE,
+        start_time_ms=0,
+        end_time_ms=300_000,
+    )
+    HistoricalCandleFileStore(tmp_path).save(cached_request, historical_fixture_candles(count=5))
+    downloader = FakeLiveCatchupDownloader(latest_completed_open_time_ms=300_000)
+
+    runtime = BackendRuntime(
+        settings=live_enabled_settings(data_root=tmp_path),
+        mode=RuntimeMode.LIVE_BITMART,
+        live_stream_runner_factory=lambda client: RecordingLiveStreamRunner().bind(client),
+        historical_downloader=downloader,
+    )
+
+    runtime.start()
+
+    assert downloader.requests == [(300_000, 360_000)]
+    assert [candle.open_time_ms for candle in runtime.visualization_api.get_candles("BTCUSDT", Timeframe.ONE_MINUTE)] == [
+        0,
+        60_000,
+        120_000,
+        180_000,
+        240_000,
+        300_000,
+    ]
+
+
 def test_live_startup_with_current_cache_does_not_request_rest_catchup(tmp_path: Path) -> None:
     cached_request = HistoricalCandleRequest(
         symbol="BTCUSDT",
@@ -705,8 +812,8 @@ def test_historical_replay_boundary_does_not_emit_cross_gap_higher_timeframe_can
     assert fifteen_minute == ()
 
 
-def test_live_warn_policy_reaches_running_with_known_cache_gap(tmp_path: Path) -> None:
-    """M31.6.1 live startup may reach live after WARN replay gaps are segmented."""
+def test_live_warn_policy_repairs_known_cache_gap_before_live_handoff(tmp_path: Path) -> None:
+    """M31.6.2 live startup repairs known gaps when REST data is available."""
 
     request = gapped_replay_request()
     candles = gapped_replay_candles(post_gap_count=8)
@@ -739,9 +846,9 @@ def test_live_warn_policy_reaches_running_with_known_cache_gap(tmp_path: Path) -
     complete_cache_integrity = runtime.health().complete_cache_integrity
     replay_integrity = runtime.health().replay_integrity
     assert complete_cache_integrity is not None
-    assert complete_cache_integrity.gap_count == 1
+    assert complete_cache_integrity.complete
     assert replay_integrity is not None
-    assert replay_integrity.gap_count == 1
+    assert replay_integrity.complete
 
 
 def test_api_health_available_while_live_sync_initializes_in_background(tmp_path: Path) -> None:

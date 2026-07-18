@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+from backend.engines.historical import HistoricalHorizon, required_start_for_configured_horizon
 from backend.exchange import ContractMetadata, ExchangeName, MarketType
 from backend.models import Timeframe
 from backend.pipelines.timeframe.aggregation import timeframe_duration_ms
@@ -14,9 +15,11 @@ class IncrementalSyncPlanner:
     """Gap-aware 1m sync planner for SYNC-001..006."""
 
     history_store: CandleHistoryStore
-    history_horizon_ms: int
     exchange: ExchangeName
     market_type: MarketType
+    history_horizon_ms: int | None = None
+    history_horizon: HistoricalHorizon = field(default_factory=HistoricalHorizon)
+    legacy_horizon_days: int | None = None
     priority_symbols: tuple[str, ...] = ()
 
     def plan_symbol(
@@ -32,10 +35,7 @@ class IncrementalSyncPlanner:
             symbol=contract.canonical_symbol,
             timeframe=Timeframe.ONE_MINUTE,
         )
-        start_floor = max(
-            contract.listing_time_ms or 0,
-            now_ms - self.history_horizon_ms,
-        )
+        start_floor = max(contract.listing_time_ms or 0, self._start_floor(now_ms))
         if local_last is None:
             start_time = align_minute(start_floor)
             reason = SyncReason.INITIAL_BACKFILL
@@ -93,6 +93,16 @@ class IncrementalSyncPlanner:
 
     def _priority(self, symbol: str) -> SyncPriority:
         return SyncPriority.HIGH if symbol in self.priority_symbols else SyncPriority.NORMAL
+
+    def _start_floor(self, now_ms: int) -> int:
+        if self.history_horizon_ms is not None:
+            return align_minute(now_ms - self.history_horizon_ms)
+        return required_start_for_configured_horizon(
+            now_ms,
+            timeframe=Timeframe.ONE_MINUTE,
+            horizon=self.history_horizon,
+            legacy_horizon_days=self.legacy_horizon_days,
+        )
 
 
 def align_minute(timestamp_ms: int) -> int:

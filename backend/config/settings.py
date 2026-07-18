@@ -77,6 +77,14 @@ class DemoSettings(BaseModel):
     enabled: bool = True
 
 
+class HistoryHorizonSettings(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    years: int = Field(default=1, ge=0)
+    months: int = Field(default=0, ge=0)
+    days: int = Field(default=0, ge=0)
+
+
 class MarketDataSyncSettings(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -85,7 +93,8 @@ class MarketDataSyncSettings(BaseModel):
     exchange: Literal["bitmart"] = "bitmart"
     market_type: Literal["usdt_m_perpetual"] = "usdt_m_perpetual"
     quote_asset: str = "USDT"
-    history_horizon_days: int = Field(default=180, ge=1)
+    history_horizon: HistoryHorizonSettings = Field(default_factory=HistoryHorizonSettings)
+    history_horizon_days: int | None = Field(default=None, ge=1)
     canonical_timeframe: Timeframe = Timeframe.ONE_MINUTE
     max_concurrent_jobs: int = Field(default=2, ge=1)
     page_size: int = Field(default=500, ge=1)

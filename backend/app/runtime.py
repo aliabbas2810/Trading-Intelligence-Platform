@@ -44,7 +44,9 @@ from backend.engines.historical import (
     HistoricalCandleFileStore,
     HistoricalCandleLoadResult,
     HistoricalCandleLoader,
+    HistoricalHorizon,
     HistoricalCandleRequest,
+    HistoricalSyncPlanner,
 )
 from backend.engines.replay import HistoricalTradeReplaySource, ReplayController
 from backend.engines.risk import RiskEngine, RiskInput, RiskPlan
@@ -205,6 +207,10 @@ class LiveCacheSyncDiagnostics:
     subscription_channel: str = BITMART_FUTURES_TRADE_CHANNEL
     subscription_acknowledged: bool = False
     cache_candle_count: int = 0
+    required_history_start_time_ms: int | None = None
+    required_history_end_time_ms: int | None = None
+    replay_start_time_ms: int | None = None
+    replay_end_time_ms: int | None = None
     cache_last_open_time_ms: int | None = None
     latest_exchange_closed_open_time_ms: int | None = None
     sync_start_time_ms: int | None = None
@@ -544,6 +550,26 @@ class BackendRuntime:
             ),
             ComponentHealth("cache_candle_count", ComponentStatus.READY, str(self._live_cache_sync.cache_candle_count)),
             ComponentHealth(
+                "required_history_start_time_ms",
+                ComponentStatus.READY,
+                str(self._live_cache_sync.required_history_start_time_ms),
+            ),
+            ComponentHealth(
+                "required_history_end_time_ms",
+                ComponentStatus.READY,
+                str(self._live_cache_sync.required_history_end_time_ms),
+            ),
+            ComponentHealth(
+                "replay_start_time_ms",
+                ComponentStatus.READY,
+                str(self._live_cache_sync.replay_start_time_ms),
+            ),
+            ComponentHealth(
+                "replay_end_time_ms",
+                ComponentStatus.READY,
+                str(self._live_cache_sync.replay_end_time_ms),
+            ),
+            ComponentHealth(
                 "cache_last_open_time_ms",
                 ComponentStatus.READY,
                 str(self._live_cache_sync.cache_last_open_time_ms),
@@ -614,6 +640,26 @@ class BackendRuntime:
                 "cache_last_open_time_iso",
                 ComponentStatus.READY,
                 iso_timestamp(self._live_cache_sync.cache_last_open_time_ms),
+            ),
+            ComponentHealth(
+                "required_history_start_time_iso",
+                ComponentStatus.READY,
+                iso_timestamp(self._live_cache_sync.required_history_start_time_ms),
+            ),
+            ComponentHealth(
+                "required_history_end_time_iso",
+                ComponentStatus.READY,
+                iso_timestamp(self._live_cache_sync.required_history_end_time_ms),
+            ),
+            ComponentHealth(
+                "replay_start_time_iso",
+                ComponentStatus.READY,
+                iso_timestamp(self._live_cache_sync.replay_start_time_ms),
+            ),
+            ComponentHealth(
+                "replay_end_time_iso",
+                ComponentStatus.READY,
+                iso_timestamp(self._live_cache_sync.replay_end_time_ms),
             ),
             ComponentHealth(
                 "latest_exchange_closed_open_time_iso",
@@ -1510,12 +1556,17 @@ class BackendRuntime:
             page_size=sync_settings.page_size,
             clock_ms=current_time_ms,
         )
-        horizon_ms = sync_settings.history_horizon_days * 24 * 60 * 60 * 1000
+        horizon_settings = sync_settings.history_horizon
         planner = IncrementalSyncPlanner(
             history_store=history_store,
-            history_horizon_ms=horizon_ms,
             exchange=exchange,
             market_type=market_type,
+            history_horizon=HistoricalHorizon(
+                years=horizon_settings.years,
+                months=horizon_settings.months,
+                days=horizon_settings.days,
+            ),
+            legacy_horizon_days=sync_settings.history_horizon_days,
             priority_symbols=sync_settings.priority_symbols,
         )
         return MarketDataSyncCoordinator(
@@ -1613,6 +1664,8 @@ class BackendRuntime:
         store = HistoricalCandleFileStore(self.settings.historical_data.data_root)
         downloader = self._historical_downloader or BitMartHistoricalCandleDownloader()
         duration_ms = 60_000
+        integrity_policy = HistoricalIntegrityPolicy(self.settings.historical_data.integrity_policy)
+        planner = HistoricalSyncPlanner()
 
         started_ms = current_time_ms()
         self._live_cache_sync = self._live_cache_sync_update(
@@ -1629,125 +1682,171 @@ class BackendRuntime:
         cached_candles = cached_result.candles if cached_result is not None else ()
         cache_last_open_time_ms = cached_candles[-1].open_time_ms if cached_candles else None
         latest_closed_open_time_ms = downloader.latest_completed_open_time_ms(symbol)
+        horizon_settings = self.settings.market_data_sync.history_horizon
+        sync_plan = planner.create_plan(
+            latest_closed_open_time_ms=latest_closed_open_time_ms,
+            timeframe=timeframe,
+            horizon=HistoricalHorizon(
+                years=horizon_settings.years,
+                months=horizon_settings.months,
+                days=horizon_settings.days,
+            ),
+            cached_open_times_ms=tuple(candle.open_time_ms for candle in cached_candles),
+            legacy_horizon_days=self.settings.market_data_sync.history_horizon_days,
+        )
         self._live_cache_sync = self._live_cache_sync_update(
             market_data_state=MarketDataRuntimeState.SYNCHRONIZING,
             cache_candle_count=len(cached_candles),
             cache_last_open_time_ms=cache_last_open_time_ms,
+            required_history_start_time_ms=sync_plan.required_start_time_ms,
+            required_history_end_time_ms=sync_plan.required_end_time_ms,
+            replay_start_time_ms=sync_plan.replay_start_time_ms,
+            replay_end_time_ms=sync_plan.replay_end_time_ms,
             latest_exchange_closed_open_time_ms=latest_closed_open_time_ms,
             current_forming_candle_open_time_ms=latest_closed_open_time_ms + duration_ms,
         )
 
-        baseline_start_ms = (
-            cached_candles[0].open_time_ms
-            if cached_candles
-            else max(
-                0,
-                latest_closed_open_time_ms - self.settings.market_data_sync.history_horizon_days * 24 * 60 * 60 * 1000,
-            )
-        )
-        catchup_start_ms = cache_last_open_time_ms + duration_ms if cache_last_open_time_ms is not None else baseline_start_ms
-        catchup_end_ms = latest_closed_open_time_ms + duration_ms
-        requested_count = max(0, (catchup_end_ms - catchup_start_ms) // duration_ms)
+        requested_count = sync_plan.requested_candle_count
         downloaded_parts: list[Candle] = []
-        integrity_report = cached_result.integrity_report if cached_result is not None else None
         page_count = 0
         retry_count = 0
-        if catchup_start_ms < catchup_end_ms:
+        if sync_plan.download_windows:
             self._live_cache_sync = self._live_cache_sync_update(
                 sync_requested_count=requested_count,
                 sync_target_final_open_time_ms=latest_closed_open_time_ms,
             )
-            cursor_ms = catchup_start_ms
-            while cursor_ms < catchup_end_ms:
-                if self._stop_requested.is_set():
-                    break
-                page_end_ms = min(self._next_live_sync_window_end(cursor_ms), catchup_end_ms)
-                if page_end_ms <= cursor_ms:
-                    raise RuntimeError(
-                        "Live cache synchronization cursor did not advance "
-                        f"cursor_ms={cursor_ms} page_end_ms={page_end_ms}",
-                    )
-                catchup_request = HistoricalCandleRequest(
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    start_time_ms=cursor_ms,
-                    end_time_ms=page_end_ms,
-                    exchange=exchange,
-                    market_type=market_type,
-                )
-                catchup_result = downloader.load_result(
-                    catchup_request,
-                    integrity_policy=HistoricalIntegrityPolicy(self.settings.historical_data.integrity_policy),
-                )
-                self._last_sync_window_integrity_report = catchup_result.integrity_report
-                if self._stop_requested.is_set():
-                    break
-                downloaded_parts.extend(catchup_result.candles)
-                integrity_report = catchup_result.integrity_report
-                page_count += max(1, getattr(catchup_result, "pages", 0))
-                retry_count += sum(gap.retry_count for gap in catchup_result.integrity_report.gaps)
-                if catchup_result.candles:
-                    store.save_daily_segments(
-                        catchup_result.candles,
+            for window in sync_plan.download_windows:
+                cursor_ms = window.start_time_ms
+                while cursor_ms < window.end_time_ms:
+                    if self._stop_requested.is_set():
+                        break
+                    page_end_ms = min(self._next_live_sync_window_end(cursor_ms), window.end_time_ms)
+                    if page_end_ms <= cursor_ms:
+                        raise RuntimeError(
+                            "Live cache synchronization cursor did not advance "
+                            f"cursor_ms={cursor_ms} page_end_ms={page_end_ms}",
+                        )
+                    catchup_request = HistoricalCandleRequest(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        start_time_ms=cursor_ms,
+                        end_time_ms=page_end_ms,
                         exchange=exchange,
                         market_type=market_type,
                     )
-                self._live_cache_sync = self._live_cache_sync_update(
-                    sync_page_count=page_count,
-                    sync_retry_count=retry_count,
-                    sync_loaded_count=len(downloaded_parts),
-                    sync_persisted_count=len(downloaded_parts),
-                    sync_gap_count=catchup_result.integrity_report.gap_count,
-                    sync_window_gap_count=catchup_result.integrity_report.gap_count,
-                    newly_discovered_gap_count=catchup_result.integrity_report.gap_count,
-                    sync_current_final_persisted_open_time_ms=(
-                        catchup_result.candles[-1].open_time_ms if catchup_result.candles else None
-                    ),
-                    sync_last_progress_time_ms=current_time_ms(),
-                )
-                cursor_ms = page_end_ms
+                    catchup_result = downloader.load_result(
+                        catchup_request,
+                        integrity_policy=integrity_policy,
+                    )
+                    self._last_sync_window_integrity_report = catchup_result.integrity_report
+                    if self._stop_requested.is_set():
+                        break
+                    downloaded_parts.extend(catchup_result.candles)
+                    page_count += max(1, getattr(catchup_result, "pages", 0))
+                    retry_count += sum(gap.retry_count for gap in catchup_result.integrity_report.gaps)
+                    if catchup_result.candles:
+                        store.save_daily_segments(
+                            catchup_result.candles,
+                            exchange=exchange,
+                            market_type=market_type,
+                        )
+                    self._logger.info(
+                        "Live historical sync page completed "
+                        "symbol=%s timeframe=%s reason=%s page_start_ms=%s page_end_ms=%s "
+                        "loaded_count=%s accumulated_count=%s",
+                        symbol,
+                        timeframe.value,
+                        window.reason,
+                        cursor_ms,
+                        page_end_ms,
+                        len(catchup_result.candles),
+                        len(downloaded_parts),
+                    )
+                    self._live_cache_sync = self._live_cache_sync_update(
+                        sync_page_count=page_count,
+                        sync_retry_count=retry_count,
+                        sync_loaded_count=len(downloaded_parts),
+                        sync_persisted_count=len(downloaded_parts),
+                        sync_gap_count=catchup_result.integrity_report.gap_count,
+                        sync_window_gap_count=catchup_result.integrity_report.gap_count,
+                        newly_discovered_gap_count=catchup_result.integrity_report.gap_count,
+                        sync_current_final_persisted_open_time_ms=(
+                            catchup_result.candles[-1].open_time_ms if catchup_result.candles else None
+                        ),
+                        sync_last_progress_time_ms=current_time_ms(),
+                    )
+                    cursor_ms = page_end_ms
+                if self._stop_requested.is_set():
+                    break
         downloaded = tuple(downloaded_parts)
 
-        merged_by_open_time = {candle.open_time_ms: candle for candle in cached_candles}
-        deduplicated = 0
-        inserted = 0
-        for candle in downloaded:
-            if candle.open_time_ms in merged_by_open_time:
-                deduplicated += 1
-            else:
-                inserted += 1
-            merged_by_open_time[candle.open_time_ms] = candle
-        merged_candles = tuple(merged_by_open_time[key] for key in sorted(merged_by_open_time))
-        if merged_candles:
-            merged_request = HistoricalCandleRequest(
-                symbol=symbol,
-                timeframe=timeframe,
-                start_time_ms=merged_candles[0].open_time_ms,
-                end_time_ms=merged_candles[-1].open_time_ms + duration_ms,
-                exchange=exchange,
-                market_type=market_type,
+        repaired_result = store.merged_result(
+            exchange=exchange,
+            market_type=market_type,
+            symbol=symbol,
+            timeframe=timeframe,
+            integrity_policy=HistoricalIntegrityPolicy.WARN,
+        )
+        repaired_candles = repaired_result.candles if repaired_result is not None else ()
+        repaired_plan = planner.plan(
+            required_start_time_ms=sync_plan.required_start_time_ms,
+            required_end_time_ms=sync_plan.required_end_time_ms,
+            cached_open_times_ms=tuple(candle.open_time_ms for candle in repaired_candles),
+            timeframe=timeframe,
+        )
+        replay_candles = sync_plan.select_replay_candles(repaired_candles)
+        cached_open_times = {
+            candle.open_time_ms
+            for candle in cached_candles
+            if sync_plan.replay_start_time_ms <= candle.open_time_ms < sync_plan.replay_end_time_ms
+        }
+        downloaded_open_times = {candle.open_time_ms for candle in downloaded}
+        deduplicated = len(cached_open_times.intersection(downloaded_open_times))
+        inserted = len(downloaded_open_times.difference(cached_open_times))
+        merged_request = HistoricalCandleRequest(
+            symbol=symbol,
+            timeframe=timeframe,
+            start_time_ms=sync_plan.replay_start_time_ms,
+            end_time_ms=sync_plan.replay_end_time_ms,
+            exchange=exchange,
+            market_type=market_type,
+        )
+        merged_report = self._merged_live_integrity_report(
+            merged_request,
+            replay_candles,
+        )
+        self._historical_integrity_report = merged_report
+        self._complete_cache_integrity_report = merged_report
+        if integrity_policy is HistoricalIntegrityPolicy.STRICT and not merged_report.complete:
+            raise ValueError(
+                "Strict live startup rejected incomplete required historical cache "
+                f"symbol={symbol} timeframe={timeframe.value} "
+                f"required_start_time_ms={sync_plan.replay_start_time_ms} "
+                f"required_end_time_ms={sync_plan.replay_end_time_ms} "
+                f"remaining_window_count={len(repaired_plan.download_windows)} "
+                f"missing_candle_count={merged_report.total_missing_candles}",
             )
-            merged_report = self._merged_live_integrity_report(
-                merged_request,
-                merged_candles,
-                fallback=integrity_report,
+        if replay_candles:
+            self._historical_candle_count = len(replay_candles)
+            self._historical_live_min_trade_timestamp_ms = (
+                sync_plan.replay_end_time_ms if merged_report.complete else replay_candles[-1].close_time_ms
             )
-            self._historical_integrity_report = merged_report
-            self._complete_cache_integrity_report = merged_report
-            self._historical_candle_count = len(merged_candles)
-            self._historical_live_min_trade_timestamp_ms = merged_candles[-1].close_time_ms
             self._replay_historical_candles(
-                merged_candles,
-                integrity_policy=HistoricalIntegrityPolicy(self.settings.historical_data.integrity_policy),
+                replay_candles,
+                integrity_policy=integrity_policy,
                 source_request=merged_request,
             )
             self._seed_cached_aois_if_possible()
 
         self._live_cache_sync = self._live_cache_sync_update(
             market_data_state=MarketDataRuntimeState.HANDING_OFF,
-            cache_candle_count=len(merged_candles),
-            cache_last_open_time_ms=merged_candles[-1].open_time_ms if merged_candles else None,
+            cache_candle_count=len(replay_candles),
+            cache_last_open_time_ms=replay_candles[-1].open_time_ms if replay_candles else None,
             latest_exchange_closed_open_time_ms=latest_closed_open_time_ms,
+            required_history_start_time_ms=sync_plan.required_start_time_ms,
+            required_history_end_time_ms=sync_plan.required_end_time_ms,
+            replay_start_time_ms=sync_plan.replay_start_time_ms,
+            replay_end_time_ms=sync_plan.replay_end_time_ms,
             sync_end_time_ms=current_time_ms(),
             sync_requested_count=requested_count,
             sync_page_count=page_count,
@@ -1777,11 +1876,11 @@ class BackendRuntime:
                 if self._complete_cache_integrity_report is not None
                 else 0
             ),
-            sync_current_final_persisted_open_time_ms=merged_candles[-1].open_time_ms if merged_candles else None,
+            sync_current_final_persisted_open_time_ms=replay_candles[-1].open_time_ms if replay_candles else None,
             sync_target_final_open_time_ms=latest_closed_open_time_ms,
             sync_last_progress_time_ms=current_time_ms(),
-            last_finalized_candle_open_time_ms=merged_candles[-1].open_time_ms if merged_candles else None,
-            last_persisted_candle_open_time_ms=merged_candles[-1].open_time_ms if merged_candles else None,
+            last_finalized_candle_open_time_ms=replay_candles[-1].open_time_ms if replay_candles else None,
+            last_persisted_candle_open_time_ms=replay_candles[-1].open_time_ms if replay_candles else None,
             rest_reconciliation_count=self._live_cache_sync.rest_reconciliation_count + 1,
             reconciled_candle_count=len(downloaded),
         )
@@ -1825,8 +1924,6 @@ class BackendRuntime:
         self,
         request: HistoricalCandleRequest,
         candles: tuple[Candle, ...],
-        *,
-        fallback: HistoricalIntegrityReport | None,
     ) -> HistoricalIntegrityReport:
         from backend.engines.historical.loader import inferred_integrity_report
 
@@ -1898,6 +1995,7 @@ class BackendRuntime:
             exchange_request_from_historical_request,
             historical_gap_from_missing_times,
             historical_status_for_policy,
+            inferred_integrity_report,
         )
 
         sorted_candles = tuple(sorted(candles, key=lambda item: (item.timeframe.value, item.open_time_ms)))
@@ -1933,13 +2031,10 @@ class BackendRuntime:
             previous = candle
 
         if not gaps:
-            self._replay_integrity_report = HistoricalIntegrityReport.valid(
-                exchange_request_from_historical_request(
-                    source_request,
-                    integrity_policy=integrity_policy,
-                ),
-                requested_candle_count=expected_candle_count(source_request),
-                loaded_candle_count=len(one_minute_candles),
+            self._replay_integrity_report = inferred_integrity_report(
+                source_request,
+                one_minute_candles,
+                integrity_policy=integrity_policy,
             )
             return
         self._replay_integrity_report = HistoricalIntegrityReport.from_gaps(
