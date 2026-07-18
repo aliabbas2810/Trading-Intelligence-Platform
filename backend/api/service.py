@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
@@ -90,8 +91,14 @@ def create_app(runtime: BackendRuntime | None = None) -> FastAPI:
     def market_structure(request: Request, symbol: str, timeframe: Timeframe) -> object:
         """Read precomputed structure through the visualization boundary for FR-602/FR-604."""
 
-        api = runtime_from_request(request).visualization_api
-        return jsonable_encoder(api.get_market_structure(symbol, timeframe))
+        snapshot = runtime_from_request(request).market_structure_snapshot(symbol, timeframe)
+        return jsonable_encoder(_public_market_structure_response(snapshot))
+
+    @app.get("/api/market-state")
+    def market_state(request: Request, symbol: str) -> object:
+        """Return only the authoritative Weekly/Daily/4H current market state."""
+
+        return jsonable_encoder(runtime_from_request(request).market_state(symbol))
 
     @app.get("/api/trend-state")
     def trend_state(request: Request, symbol: str, timeframe: Timeframe) -> object:
@@ -394,6 +401,29 @@ def create_app(runtime: BackendRuntime | None = None) -> FastAPI:
 
 def runtime_from_request(request: Request) -> BackendRuntime:
     return runtime_from_app(request.app)
+
+
+def _public_market_structure_response(snapshot: Any) -> dict[str, object]:
+    """Expose prefixed public labels for M31.7 without leaking generic chart labels."""
+
+    swings = tuple(
+        {
+            **jsonable_encoder(swing),
+            "internal_label": swing.label.value,
+            "label": swing.display_label or swing.label.value,
+        }
+        for swing in snapshot.swings
+    )
+    breaks = tuple(
+        {
+            **jsonable_encoder(break_of_structure),
+            "internal_broken_label": break_of_structure.broken_label.value,
+            "broken_label": break_of_structure.display_label or break_of_structure.broken_label.value,
+            "label": break_of_structure.display_label or break_of_structure.broken_label.value,
+        }
+        for break_of_structure in snapshot.breaks_of_structure
+    )
+    return {"swings": swings, "breaks_of_structure": breaks}
 
 
 def runtime_from_app(app: FastAPI) -> BackendRuntime:

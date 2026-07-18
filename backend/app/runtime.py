@@ -35,6 +35,7 @@ from backend.engines.aoi import (
 from backend.engines.checklist import ChecklistEngine, ChecklistInput, ChecklistResult
 from backend.engines.entry import DecisionTrace, EntrySignalEngine, EntrySignalInput
 from backend.engines.intelligence import TradingIntelligenceResult
+from backend.engines.market_state import MARKET_STRUCTURE_TIMEFRAMES, MarketStateService
 from backend.engines.readiness import AnalysisReadiness, AnalysisReadinessEngine
 from backend.engines.historical import (
     BitMartHistoricalCandleDownloader,
@@ -253,10 +254,12 @@ class BackendRuntime:
         self.risk_engine = RiskEngine()
         self.checklist_engine = ChecklistEngine()
         self.setup_scoring_engine = SetupScoringEngine()
+        self.market_state_service = MarketStateService()
         self.readiness_engine = AnalysisReadinessEngine(
             self.candle_store,
             self.structure_store,
             self.trend_store,
+            self.market_state_service,
         )
         self.aoi_engine = AoiEngine()
         self._aoi_evaluations: dict[tuple[str, AoiTimeframe], AoiEvaluation] = {}
@@ -290,6 +293,7 @@ class BackendRuntime:
 
         configure_logging(self.settings)
         self._subscribe_components()
+        self._hydrate_market_state_from_existing_stores()
         self._load_historical_data_if_enabled()
         self._seed_demo_data_if_enabled()
         self._state = RuntimeState.RUNNING
@@ -439,10 +443,12 @@ class BackendRuntime:
         self.risk_engine = RiskEngine()
         self.checklist_engine = ChecklistEngine()
         self.setup_scoring_engine = SetupScoringEngine()
+        self.market_state_service = MarketStateService()
         self.readiness_engine = AnalysisReadinessEngine(
             self.candle_store,
             self.structure_store,
             self.trend_store,
+            self.market_state_service,
         )
         self.aoi_engine = AoiEngine()
         self._aoi_evaluations = {}
@@ -461,6 +467,19 @@ class BackendRuntime:
         self._historical_candle_count = 0
         self._historical_integrity_report = None
         self._historical_live_min_trade_timestamp_ms = None
+
+    def market_structure_snapshot(self, symbol: str, timeframe: Timeframe) -> object:
+        """Return projected authoritative 1W/1D/4H market state for chart rendering."""
+
+        return self.market_state_service.structure_snapshot(symbol, timeframe)
+
+    def market_state(self, symbol: str) -> dict[str, object]:
+        """Return the current authoritative Weekly/Daily/4H market state."""
+
+        return {
+            "symbol": symbol,
+            "timeframes": self.market_state_service.state(symbol),
+        }
 
     def run_scanner(
         self,
@@ -510,7 +529,7 @@ class BackendRuntime:
     ) -> AiDecisionOutput:
         """Generate a structured mock-provider decision for FR-1001 through FR-1006."""
 
-        structure = self.structure_store.list(symbol, timeframe)
+        structure = self.market_state_service.structure_snapshot(symbol, timeframe)
         trend = self.trend_store.get(symbol, timeframe)
         alignment = self.alignment_store.get(symbol)
         setup_candidate = self._latest_setup_candidate(symbol)
@@ -1259,9 +1278,21 @@ class BackendRuntime:
             structure_store=self.structure_store,
             trend_store=self.trend_store,
             alignment_store=self.alignment_store,
+            market_state_service=self.market_state_service,
         )
         self._seed_cached_aois_if_possible()
         self._demo_seeded = True
+
+    def _hydrate_market_state_from_existing_stores(self) -> None:
+        for timeframe in MARKET_STRUCTURE_TIMEFRAMES:
+            snapshot = self.structure_store.list(self.active_symbol, timeframe)
+            for swing in snapshot.swings:
+                self.market_state_service.update_swing(swing)
+            for break_of_structure in snapshot.breaks_of_structure:
+                self.market_state_service.update_break_of_structure(break_of_structure)
+            trend = self.trend_store.get(self.active_symbol, timeframe).update
+            if trend is not None:
+                self.market_state_service.update_trend(trend)
 
     def _seed_cached_aois_if_possible(self) -> None:
         """Seed cached AOIs from existing stores for AOI-VIS-001 and AOI-GATE-001."""
@@ -1480,6 +1511,8 @@ class BackendRuntime:
         self.candle_store.save(candle)
 
     def _handle_completed_candle(self, candle: Candle) -> None:
+        if candle.timeframe not in MARKET_STRUCTURE_TIMEFRAMES:
+            return
         structure_engine = self._structure_engine_for(candle)
         for structure_event in structure_engine.add_candle(candle):
             self._store_structure_event(structure_event)
@@ -1488,8 +1521,10 @@ class BackendRuntime:
     def _store_structure_event(self, event: StructureEvent) -> None:
         if event.swing is not None:
             self.structure_store.add_swing(event.swing)
+            self.market_state_service.update_swing(event.swing)
         if event.break_of_structure is not None:
             self.structure_store.add_break_of_structure(event.break_of_structure)
+            self.market_state_service.update_break_of_structure(event.break_of_structure)
 
     def _handle_structure_event(self, event: StructureEvent) -> None:
         trend_engine = self._trend_engine_for(event)
@@ -1498,6 +1533,7 @@ class BackendRuntime:
             return
 
         self.trend_store.set(trend_update)
+        self.market_state_service.update_trend(trend_update)
         self.event_bus.publish(TrendChangedEvent(update=trend_update))
         self._trend_snapshots[(trend_update.symbol, trend_update.timeframe)] = TimeframeTrendSnapshot(
             symbol=trend_update.symbol,
@@ -1511,6 +1547,8 @@ class BackendRuntime:
         self.event_bus.publish(MultiTimeframeTrendAggregatedEvent(result=result))
 
     def _structure_engine_for(self, candle: Candle) -> MarketStructureEngine:
+        if candle.timeframe not in MARKET_STRUCTURE_TIMEFRAMES:
+            raise RuntimeError(f"Market structure is only owned by 1w, 1d, and 4h, not {candle.timeframe.value}")
         key = (candle.symbol, candle.timeframe)
         if key not in self._structure_engines:
             self._structure_engines[key] = MarketStructureEngine()
@@ -1544,7 +1582,7 @@ class BackendRuntime:
             if trend.state is TrendState.BULLISH
             else (StructureLabel.LH, StructureLabel.LL)
         )
-        swings = self.structure_store.list(symbol, domain_timeframe).swings
+        swings = self.market_state_service.structure_snapshot(symbol, domain_timeframe).swings
         end = next((item for item in reversed(swings) if item.label is labels[1]), None)
         start = next(
             (
@@ -1574,7 +1612,7 @@ class BackendRuntime:
         )
 
     def _scanner_input_for(self, symbol: str, timeframe: Timeframe) -> SymbolScanInput:
-        structure = self.structure_store.list(symbol, timeframe)
+        structure = self.market_state_service.structure_snapshot(symbol, timeframe)
         trend = self.trend_store.get(symbol, timeframe).update
         candles = self.candle_store.list(symbol, timeframe)
         return SymbolScanInput(
@@ -1588,7 +1626,7 @@ class BackendRuntime:
 
     def _entry_signal_input_for(self, symbol: str) -> EntrySignalInput:
         structures = {
-            timeframe: self.structure_store.list(symbol, timeframe)
+            timeframe: self.market_state_service.structure_snapshot(symbol, timeframe)
             for timeframe in (Timeframe.FIFTEEN_MINUTE, Timeframe.FIVE_MINUTE, Timeframe.ONE_MINUTE)
         }
         one_minute_candles = self.candle_store.list(symbol, Timeframe.ONE_MINUTE)
@@ -1621,14 +1659,14 @@ class BackendRuntime:
         return tuple(
             swing
             for timeframe in (Timeframe.FIFTEEN_MINUTE, Timeframe.FIVE_MINUTE, Timeframe.ONE_MINUTE)
-            for swing in self.structure_store.list(symbol, timeframe).swings
+            for swing in self.market_state_service.structure_snapshot(symbol, timeframe).swings
         )
 
     def _risk_bos_events(self, symbol: str) -> tuple[BreakOfStructure, ...]:
         return tuple(
             event
             for timeframe in (Timeframe.FIFTEEN_MINUTE, Timeframe.FIVE_MINUTE, Timeframe.ONE_MINUTE)
-            for event in self.structure_store.list(symbol, timeframe).breaks_of_structure
+            for event in self.market_state_service.structure_snapshot(symbol, timeframe).breaks_of_structure
         )
 
     def _latest_setup_candidate(self, symbol: str) -> SetupCandidate | None:

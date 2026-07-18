@@ -12,6 +12,7 @@ from backend.engines.structure import (
     StructureSwing,
     SwingKind,
 )
+from backend.engines.market_state import MARKET_STRUCTURE_TIMEFRAMES, MarketStateService
 from backend.engines.trend import (
     DirectionalBias,
     MultiTimeframeMode,
@@ -50,6 +51,7 @@ def seed_demo_visualization_data(
     structure_store: InMemoryStructureReadStore,
     trend_store: InMemoryTrendReadStore,
     alignment_store: InMemoryAlignmentReadStore,
+    market_state_service: MarketStateService | None = None,
 ) -> None:
     """Seed deterministic dry-run read models for local visualization under RUNTIME-005."""
 
@@ -57,11 +59,17 @@ def seed_demo_visualization_data(
         candle_store.save(candle)
     for swing in generate_demo_swings(symbol):
         structure_store.add_swing(swing)
+        if market_state_service is not None and swing.timeframe in MARKET_STRUCTURE_TIMEFRAMES:
+            market_state_service.update_swing(swing)
     for break_of_structure in generate_demo_breaks(symbol):
         structure_store.add_break_of_structure(break_of_structure)
+        if market_state_service is not None and break_of_structure.timeframe in MARKET_STRUCTURE_TIMEFRAMES:
+            market_state_service.update_break_of_structure(break_of_structure)
     trend_updates = generate_demo_trend_updates(symbol)
     for update in trend_updates:
         trend_store.set(update)
+        if market_state_service is not None and update.timeframe in MARKET_STRUCTURE_TIMEFRAMES:
+            market_state_service.update_trend(update)
     alignment_store.set(generate_demo_alignment(symbol, trend_updates))
 
 

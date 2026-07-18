@@ -205,8 +205,8 @@ def test_runtime_archives_cached_aoi_when_active_leg_changes() -> None:
 
     with TestClient(create_app(runtime)) as client:
         first = client.post("/api/aois/evaluate", json=_evaluate_payload("1d"))
-        runtime.structure_store.add_swing(_swing(StructureLabel.HL, 91, 30, Timeframe.DAILY))
-        runtime.structure_store.add_swing(_swing(StructureLabel.HH, 111, 40, Timeframe.DAILY))
+        _add_swing(runtime, _swing(StructureLabel.HL, 91, 30, Timeframe.DAILY))
+        _add_swing(runtime, _swing(StructureLabel.HH, 111, 40, Timeframe.DAILY))
         second = client.post("/api/aois/evaluate", json=_evaluate_payload("1d"))
 
     assert first.status_code == 200
@@ -244,9 +244,11 @@ def test_runtime_invalidates_cached_aoi_when_trend_changes() -> None:
 
     with TestClient(create_app(runtime)) as client:
         first = client.post("/api/aois/evaluate", json=_evaluate_payload("1d"))
-        runtime.trend_store.set(_trend(Timeframe.DAILY, TrendState.BEARISH, 31_000))
-        runtime.structure_store.add_swing(_swing(StructureLabel.LH, 111, 30, Timeframe.DAILY))
-        runtime.structure_store.add_swing(_swing(StructureLabel.LL, 91, 40, Timeframe.DAILY))
+        bearish = _trend(Timeframe.DAILY, TrendState.BEARISH, 31_000)
+        runtime.trend_store.set(bearish)
+        runtime.market_state_service.update_trend(bearish)
+        _add_swing(runtime, _swing(StructureLabel.LH, 111, 30, Timeframe.DAILY))
+        _add_swing(runtime, _swing(StructureLabel.LL, 91, 40, Timeframe.DAILY))
         second = client.post("/api/aois/evaluate", json=_evaluate_payload("1d"))
 
     assert first.status_code == 200
@@ -285,9 +287,11 @@ def _seed_bullish_leg(
                 volume=1,
             )
         )
-    runtime.structure_store.add_swing(_swing(StructureLabel.HL, 90, 0, timeframe))
-    runtime.structure_store.add_swing(_swing(StructureLabel.HH, 110, 20, timeframe))
-    runtime.trend_store.set(_trend(timeframe, TrendState.BULLISH, 21_000))
+    _add_swing(runtime, _swing(StructureLabel.HL, 90, 0, timeframe))
+    _add_swing(runtime, _swing(StructureLabel.HH, 110, 20, timeframe))
+    trend = _trend(timeframe, TrendState.BULLISH, 21_000)
+    runtime.trend_store.set(trend)
+    runtime.market_state_service.update_trend(trend)
 
 
 def _evaluate_payload(timeframe: str) -> dict[str, str | float]:
@@ -364,3 +368,8 @@ def _swing(
         candle_open_time_ms=index * 1_000,
         candle_close_time_ms=(index + 1) * 1_000,
     )
+
+
+def _add_swing(runtime: BackendRuntime, swing: StructureSwing) -> None:
+    runtime.structure_store.add_swing(swing)
+    runtime.market_state_service.update_swing(swing)

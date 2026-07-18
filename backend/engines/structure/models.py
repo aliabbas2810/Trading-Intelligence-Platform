@@ -46,6 +46,8 @@ class StructureSwing:
     level: float
     candle_open_time_ms: int
     candle_close_time_ms: int
+    display_label: str | None = None
+    source_timeframe: Timeframe | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +62,8 @@ class BreakOfStructure:
     candle_close: float
     candle_open_time_ms: int
     candle_close_time_ms: int
+    display_label: str | None = None
+    source_timeframe: Timeframe | None = None
 
 
 @dataclass(frozen=True, slots=True)

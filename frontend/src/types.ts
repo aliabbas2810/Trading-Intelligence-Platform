@@ -25,6 +25,8 @@ export interface StructureSwingDto {
   timeframe: Timeframe;
   kind: "high" | "low";
   label: StructureLabel;
+  display_label?: string | null;
+  source_timeframe?: Timeframe | null;
   level: number;
   candle_open_time_ms: number;
   candle_close_time_ms: number;
@@ -35,6 +37,8 @@ export interface BreakOfStructureDto {
   timeframe: Timeframe;
   direction: BosDirection;
   broken_label: StructureLabel;
+  display_label?: string | null;
+  source_timeframe?: Timeframe | null;
   broken_level: number;
   candle_close: number;
   candle_open_time_ms: number;

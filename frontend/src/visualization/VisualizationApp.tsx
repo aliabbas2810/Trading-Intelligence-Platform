@@ -1012,11 +1012,11 @@ function ChartCanvas({
     for (const swing of structure.swings) {
       series.createPriceLine({
         price: swing.level,
-        color: colorForStructureLabel(swing.label),
+        color: colorForStructureSource(swing.source_timeframe ?? swing.timeframe),
         lineWidth: 2,
         lineStyle: 2,
         axisLabelVisible: true,
-        title: swing.label,
+        title: swing.display_label ?? swing.label,
       });
     }
     for (const item of bos) {
@@ -1090,11 +1090,10 @@ function toChartCandle(candle: CandleDto): CandlestickData<Time> {
   };
 }
 
-function colorForStructureLabel(label: string): string {
-  if (label === "HH") return "#38bdf8";
-  if (label === "HL") return "#22c55e";
-  if (label === "LH") return "#f59e0b";
-  if (label === "LL") return "#ef4444";
+function colorForStructureSource(timeframe: string): string {
+  if (timeframe === "1w") return "#a855f7";
+  if (timeframe === "1d") return "#38bdf8";
+  if (timeframe === "4h") return "#f59e0b";
   return "#94a3b8";
 }
 

@@ -44,7 +44,11 @@ def test_demo_btcusdt_has_complete_read_models_for_all_supported_timeframes() ->
             assert structure.status_code == 200
             assert trend.status_code == 200
             assert candles.json(), timeframe
-            assert {item["label"] for item in structure.json()["swings"]} == {"HH", "HL", "LH", "LL"}
+            swings = structure.json()["swings"]
+            assert swings, timeframe
+            assert {item["source_timeframe"] for item in swings} <= {"1w", "1d", "4h"}
+            assert len(swings) <= 6
+            assert all(item["display_label"][0] in {"W", "D", "4"} for item in swings)
             assert structure.json()["breaks_of_structure"], timeframe
             assert trend.json()["update"]["state"] == "bullish"
 
@@ -63,10 +67,9 @@ def test_demo_seed_data_is_directionally_consistent_for_long_intelligence() -> N
 
     with TestClient(create_app(runtime)):
         latest_candle = runtime.candle_store.list("BTCUSDT", Timeframe.ONE_MINUTE)[-1]
-        lower_timeframe_swings = [
+        projected_swings = [
             swing
-            for timeframe in (Timeframe.FIFTEEN_MINUTE, Timeframe.FIVE_MINUTE, Timeframe.ONE_MINUTE)
-            for swing in runtime.structure_store.list("BTCUSDT", timeframe).swings
+            for swing in runtime.market_state_service.structure_snapshot("BTCUSDT", Timeframe.ONE_MINUTE).swings
         ]
         higher_timeframe_trends = [
             runtime.trend_store.get("BTCUSDT", timeframe).update
@@ -82,13 +85,15 @@ def test_demo_seed_data_is_directionally_consistent_for_long_intelligence() -> N
 
     assert latest_candle.close > 0
     assert all(update is not None and update.state.value == "bullish" for update in higher_timeframe_trends)
-    assert all(swing.level > 0 for swing in lower_timeframe_swings)
-    assert any(swing.label.value == "HL" and swing.level < latest_candle.close for swing in lower_timeframe_swings)
-    assert any(swing.label.value == "HH" for swing in lower_timeframe_swings)
+    assert all(swing.level > 0 for swing in projected_swings)
+    assert any(swing.label.value == "HL" and swing.level < latest_candle.close for swing in projected_swings)
+    assert any(swing.label.value == "HH" for swing in projected_swings)
     assert all(
         bos.direction.value == "bullish"
-        for timeframe in (Timeframe.FIFTEEN_MINUTE, Timeframe.FIVE_MINUTE, Timeframe.ONE_MINUTE)
-        for bos in runtime.structure_store.list("BTCUSDT", timeframe).breaks_of_structure
+        for bos in runtime.market_state_service.structure_snapshot(
+            "BTCUSDT",
+            Timeframe.ONE_MINUTE,
+        ).breaks_of_structure
     )
 
 

@@ -180,7 +180,10 @@ def test_structure_trend_and_alignment_endpoints_use_read_boundaries() -> None:
     )
     runtime.structure_store.add_swing(swing)
     runtime.structure_store.add_break_of_structure(bos)
+    runtime.market_state_service.update_swing(swing)
+    runtime.market_state_service.update_break_of_structure(bos)
     runtime.trend_store.set(trend)
+    runtime.market_state_service.update_trend(trend)
     runtime.alignment_store.set(alignment)
 
     with TestClient(create_app(runtime)) as client:
@@ -198,7 +201,10 @@ def test_structure_trend_and_alignment_endpoints_use_read_boundaries() -> None:
         )
 
     assert structure_response.status_code == 200
-    assert structure_response.json()["swings"][0]["label"] == "HH"
+    assert structure_response.json()["swings"][0]["label"] == "4HH"
+    assert structure_response.json()["swings"][0]["internal_label"] == "HH"
+    assert structure_response.json()["swings"][0]["display_label"] == "4HH"
+    assert structure_response.json()["swings"][0]["source_timeframe"] == "4h"
     assert structure_response.json()["breaks_of_structure"][0]["direction"] == "bullish"
     assert trend_response.status_code == 200
     assert trend_response.json()["update"]["state"] == "bullish"
@@ -226,18 +232,90 @@ def test_dry_run_demo_mode_returns_non_empty_visualization_api_responses() -> No
         }
         alignment_response = client.get("/api/multi-timeframe-alignment", params={"symbol": "BTCUSDT"})
 
-    for candles_response, structure_response, trend_response in responses.values():
+    expected_display_labels = {
+        "1w": {"WHH", "WHL"},
+        "1d": {"WHH", "WHL", "DHH", "DHL"},
+        "4h": {"WHH", "WHL", "DHH", "DHL", "4HH", "4HL"},
+        "2h": {"WHH", "WHL", "DHH", "DHL", "4HH", "4HL"},
+        "1h": {"WHH", "WHL", "DHH", "DHL", "4HH", "4HL"},
+        "30m": {"WHH", "WHL", "DHH", "DHL", "4HH", "4HL"},
+        "15m": {"WHH", "WHL", "DHH", "DHL", "4HH", "4HL"},
+        "5m": {"WHH", "WHL", "DHH", "DHL", "4HH", "4HL"},
+        "1m": {"WHH", "WHL", "DHH", "DHL", "4HH", "4HL"},
+    }
+    for timeframe, (candles_response, structure_response, trend_response) in responses.items():
         assert candles_response.status_code == 200
         assert structure_response.status_code == 200
         assert trend_response.status_code == 200
         assert len(candles_response.json()) > 0
-        assert {item["label"] for item in structure_response.json()["swings"]} == {"HH", "HL", "LH", "LL"}
+        swings = structure_response.json()["swings"]
+        assert {item["display_label"] for item in swings} == expected_display_labels[timeframe]
+        assert {item["source_timeframe"] for item in swings} <= {"1w", "1d", "4h"}
+        assert len(swings) <= 6
         assert len(structure_response.json()["breaks_of_structure"]) > 0
         assert trend_response.json()["update"]["state"] == "bullish"
 
     assert alignment_response.status_code == 200
     assert alignment_response.json()["alignment_score"] == 3
     assert alignment_response.json()["bias"] == "bullish"
+
+
+def test_market_state_endpoint_exposes_only_authoritative_structure_timeframes() -> None:
+    """M31.7: current market state is owned only by Weekly, Daily, and 4H."""
+
+    runtime = BackendRuntime(mode=RuntimeMode.DRY_RUN)
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.get("/api/market-state", params={"symbol": "BTCUSDT"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert set(payload["timeframes"]) == {"1w", "1d", "4h"}
+    assert {item["label"] for state in payload["timeframes"].values() for item in state["swings"]} == {
+        "WHH",
+        "WHL",
+        "DHH",
+        "DHL",
+        "4HH",
+        "4HL",
+    }
+
+
+def test_runtime_rejects_lower_timeframe_structure_engine_ownership() -> None:
+    """M31.7 prevents 2H/1H/30M/15M/5M/1M structure-engine instantiation."""
+
+    runtime = BackendRuntime(mode=RuntimeMode.DRY_RUN)
+    lower_timeframe_candle = Candle(
+        symbol="BTCUSDT",
+        timeframe=Timeframe.ONE_MINUTE,
+        open_time_ms=0,
+        close_time_ms=60_000,
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=1.0,
+    )
+
+    with pytest.raises(RuntimeError, match="only owned by 1w, 1d, and 4h"):
+        runtime._structure_engine_for(lower_timeframe_candle)
+
+
+def test_market_structure_projection_limits_public_lines_by_chart_timeframe() -> None:
+    """M31.7 projects 1W/1D/4H state downward with at most six public lines."""
+
+    runtime = BackendRuntime(mode=RuntimeMode.DRY_RUN)
+
+    with TestClient(create_app(runtime)) as client:
+        weekly = client.get("/api/market-structure", params={"symbol": "BTCUSDT", "timeframe": "1w"}).json()
+        daily = client.get("/api/market-structure", params={"symbol": "BTCUSDT", "timeframe": "1d"}).json()
+        minute = client.get("/api/market-structure", params={"symbol": "BTCUSDT", "timeframe": "1m"}).json()
+
+    assert {item["label"] for item in weekly["swings"]} == {"WHH", "WHL"}
+    assert {item["label"] for item in daily["swings"]} == {"WHH", "WHL", "DHH", "DHL"}
+    assert {item["label"] for item in minute["swings"]} == {"WHH", "WHL", "DHH", "DHL", "4HH", "4HL"}
+    assert len(minute["swings"]) <= 6
+    assert all(item["label"] != item["internal_label"] for item in minute["swings"])
 
 
 def test_historical_mode_returns_fixture_candles_from_api(tmp_path: Path) -> None:
@@ -1035,6 +1113,7 @@ def seed_entry_ready_symbol(runtime: BackendRuntime, symbol: str) -> None:
     )
     for update in trend_updates:
         runtime.trend_store.set(update)
+        runtime.market_state_service.update_trend(update)
 
     runtime.alignment_store.set(
         MultiTimeframeTrendResult(
@@ -1060,8 +1139,9 @@ def seed_entry_ready_symbol(runtime: BackendRuntime, symbol: str) -> None:
         ),
     )
 
-    for timeframe in (Timeframe.FIFTEEN_MINUTE, Timeframe.FIVE_MINUTE, Timeframe.ONE_MINUTE):
-        runtime.structure_store.add_swing(
+    for timeframe in (Timeframe.WEEKLY, Timeframe.DAILY, Timeframe.FOUR_HOUR):
+        _add_structure_swing(
+            runtime,
             StructureSwing(
                 symbol=symbol,
                 timeframe=timeframe,
@@ -1072,7 +1152,8 @@ def seed_entry_ready_symbol(runtime: BackendRuntime, symbol: str) -> None:
                 candle_close_time_ms=60_000,
             ),
         )
-        runtime.structure_store.add_swing(
+        _add_structure_swing(
+            runtime,
             StructureSwing(
                 symbol=symbol,
                 timeframe=timeframe,
@@ -1083,7 +1164,8 @@ def seed_entry_ready_symbol(runtime: BackendRuntime, symbol: str) -> None:
                 candle_close_time_ms=120_000,
             ),
         )
-        runtime.structure_store.add_break_of_structure(
+        _add_break_of_structure(
+            runtime,
             BreakOfStructure(
                 symbol=symbol,
                 timeframe=timeframe,
@@ -1181,6 +1263,16 @@ def seed_test_aois(runtime: BackendRuntime, symbol: str) -> None:
             state_changed_time_ms=120_000,
         )
         runtime._aoi_evaluations[(symbol, timeframe)] = AoiEvaluation(leg=leg, areas=(area,))
+
+
+def _add_structure_swing(runtime: BackendRuntime, swing: StructureSwing) -> None:
+    runtime.structure_store.add_swing(swing)
+    runtime.market_state_service.update_swing(swing)
+
+
+def _add_break_of_structure(runtime: BackendRuntime, break_of_structure: BreakOfStructure) -> None:
+    runtime.structure_store.add_break_of_structure(break_of_structure)
+    runtime.market_state_service.update_break_of_structure(break_of_structure)
 
 
 def seed_required_candles(runtime: BackendRuntime, symbol: str) -> None:

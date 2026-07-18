@@ -190,7 +190,9 @@ def test_historical_validation_runner_feeds_existing_runtime_paths() -> None:
     assert summary.symbol == "BTCUSDT"
     assert summary.timeframe is Timeframe.ONE_MINUTE
     assert summary.candle_count == 30
-    assert summary.structure_count > 0
+    # M31.7 restores structure ownership to 1W/1D/4H only; a short 1m
+    # fixture exercises the pipeline without fabricating lower-timeframe swings.
+    assert summary.structure_count == 0
     assert summary.bos_count >= 0
     assert summary.entry_state.value in {
         "WAIT",

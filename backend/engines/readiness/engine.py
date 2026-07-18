@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from backend.api import StructureReadStore, TrendReadStore
+from backend.engines.market_state import MarketStateService
 from backend.engines.readiness.models import (
     AlignmentReadiness,
     AnalysisReadiness,
@@ -53,10 +54,12 @@ class AnalysisReadinessEngine:
         candle_store: CandleStore,
         structure_store: StructureReadStore,
         trend_store: TrendReadStore,
+        market_state_service: MarketStateService | None = None,
     ) -> None:
         self._candle_store = candle_store
         self._structure_store = structure_store
         self._trend_store = trend_store
+        self._market_state_service = market_state_service
 
     def evaluate(
         self,
@@ -120,7 +123,11 @@ class AnalysisReadinessEngine:
         )
 
     def _structure_readiness(self, symbol: str, timeframe: Timeframe) -> StructureTimeframeReadiness:
-        snapshot = self._structure_store.list(symbol, timeframe)
+        snapshot = (
+            self._market_state_service.structure_snapshot(symbol, timeframe)
+            if self._market_state_service is not None
+            else self._structure_store.list(symbol, timeframe)
+        )
         swing_count = len(snapshot.swings)
         bos_count = len(snapshot.breaks_of_structure)
         return StructureTimeframeReadiness(

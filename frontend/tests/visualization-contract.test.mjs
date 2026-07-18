@@ -305,14 +305,15 @@ test("visualization exposes stabilization diagnostics", () => {
   assert.match(appSource, /visibleStructure\.breaks_of_structure\.length/);
 });
 
-test("structure overlays include HH, HL, LH, and LL horizontal labeled lines", () => {
+test("structure overlays render backend-projected source timeframe labels", () => {
   assert.match(typeSource, /"HH" \| "HL" \| "LH" \| "LL"/);
-  assert.match(appSource, /label === "HH"/);
-  assert.match(appSource, /label === "HL"/);
-  assert.match(appSource, /label === "LH"/);
-  assert.match(appSource, /label === "LL"/);
+  assert.match(typeSource, /display_label\?: string/);
+  assert.match(typeSource, /source_timeframe\?: Timeframe/);
+  assert.match(appSource, /colorForStructureSource/);
+  assert.match(appSource, /swing\.source_timeframe/);
   assert.match(appSource, /axisLabelVisible: true/);
-  assert.match(appSource, /title: swing\.label/);
+  assert.match(appSource, /title: swing\.display_label \?\? swing\.label/);
+  assert.doesNotMatch(appSource, /label === "HH"/);
 });
 
 test("BOS overlays support visibility and permanent or auto-clean modes", () => {
