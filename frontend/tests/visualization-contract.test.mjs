@@ -107,11 +107,60 @@ test("frontend calls trading intelligence endpoint", () => {
 
 test("frontend API base URL and polling are configurable", () => {
   assert.match(configSource, /DEFAULT_API_BASE_URL = "http:\/\/127\.0\.0\.1:8000"/);
-  assert.match(configSource, /DEFAULT_POLL_INTERVAL_MS = 0/);
+  assert.match(configSource, /DEFAULT_POLL_INTERVAL_MS = 10000/);
   assert.match(configSource, /VITE_TIP_API_BASE_URL/);
   assert.match(configSource, /VITE_TIP_POLL_INTERVAL_MS/);
   assert.match(appSource, /POLL_INTERVAL_MS/);
   assert.match(appSource, /setInterval/);
+});
+
+test("live candle polling is enabled and avoids overlapping requests", () => {
+  assert.match(configSource, /DEFAULT_POLL_INTERVAL_MS = 10000/);
+  assert.match(appSource, /visualizationRequestInFlightRef/);
+  assert.match(appSource, /reason: "request_in_flight"/);
+  assert.match(appSource, /window\.setInterval/);
+  assert.match(appSource, /window\.clearInterval/);
+  assert.match(appSource, /\[symbol, timeframe, aoiStateFilter\]/);
+});
+
+test("chart converts millisecond candle timestamps to Lightweight Charts seconds", () => {
+  assert.match(appSource, /function toChartTimestamp\(openTimeMs: number\): Time/);
+  assert.match(appSource, /Math\.floor\(openTimeMs \/ 1000\) as Time/);
+  assert.match(appSource, /time: toChartTimestamp\(candle\.open_time_ms\)/);
+});
+
+test("raw candle chart is not gated by WARMING_UP analysis readiness", () => {
+  assert.match(appSource, /readinessBlocksRawChart: false/);
+  assert.match(appSource, /candles=\{visibleCandles\}/);
+  assert.doesNotMatch(appSource, /readiness\.overall_state === "READY"[\s\S]{0,120}<ChartCanvas/);
+});
+
+test("chart appends new finalized candles and replaces the latest candle without duplicates", () => {
+  assert.match(appSource, /previousCandlesRef/);
+  assert.match(appSource, /latestChanged/);
+  assert.match(appSource, /series\.update\(toChartCandle\(candle\)\)/);
+  assert.match(appSource, /series\.update\(toChartCandle\(latestCandle\)\)/);
+  assert.match(appSource, /candlesSharePrefix/);
+  assert.match(appSource, /candles\.slice\(previousCandles\.length\)/);
+});
+
+test("chart preserves viewport and follows latest candle only near the right edge", () => {
+  assert.match(appSource, /getVisibleLogicalRange/);
+  assert.match(appSource, /barsInLogicalRange/);
+  assert.match(appSource, /barsAfter < 3/);
+  assert.match(appSource, /scrollToRealTime/);
+  assert.match(appSource, /setVisibleLogicalRange\(visibleRange\)/);
+  assert.match(appSource, /previousCandles\.length === 0/);
+  assert.match(appSource, /fitContent/);
+});
+
+test("frontend live diagnostics report candle fetch and chart update decisions", () => {
+  assert.match(appSource, /TIP candle fetch start/);
+  assert.match(appSource, /latestOpenTimeMs/);
+  assert.match(appSource, /latestChartTimestamp/);
+  assert.match(appSource, /readinessOverallState/);
+  assert.match(appSource, /updateMode/);
+  assert.match(appSource, /wasNearRightEdge/);
 });
 
 test("frontend does not calculate structure or trend labels", () => {

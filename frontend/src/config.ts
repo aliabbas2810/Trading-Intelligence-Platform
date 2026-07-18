@@ -1,17 +1,13 @@
-interface ImportMetaEnv {
+interface TipEnv {
   readonly VITE_TIP_API_BASE_URL?: string;
   readonly VITE_TIP_POLL_INTERVAL_MS?: string;
 }
 
-interface TipImportMeta extends ImportMeta {
-  readonly env?: ImportMetaEnv;
-}
-
 const DEFAULT_API_BASE_URL = "http://127.0.0.1:8000";
-const DEFAULT_POLL_INTERVAL_MS = 0;
+const DEFAULT_POLL_INTERVAL_MS = 10000;
 
-function readEnv(): ImportMetaEnv {
-  return ((import.meta as TipImportMeta).env ?? {}) as ImportMetaEnv;
+function readEnv(): TipEnv {
+  return import.meta.env as TipEnv;
 }
 
 function normalizeBaseUrl(value: string | undefined): string {
@@ -37,4 +33,3 @@ const env = readEnv();
 
 export const API_BASE_URL = normalizeBaseUrl(env.VITE_TIP_API_BASE_URL);
 export const POLL_INTERVAL_MS = parsePollInterval(env.VITE_TIP_POLL_INTERVAL_MS);
-

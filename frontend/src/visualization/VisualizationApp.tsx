@@ -101,6 +101,7 @@ export function VisualizationApp() {
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [lastRefreshTime, setLastRefreshTime] = useState<string | null>(null);
+  const visualizationRequestInFlightRef = useRef(false);
   const [data, setData] = useState<VisualizationData>({
     candles: [],
     structure: { swings: [], breaks_of_structure: [] },
@@ -117,10 +118,17 @@ export function VisualizationApp() {
     let active = true;
     const controller = new AbortController();
     async function load() {
+      visualizationRequestInFlightRef.current = true;
       setLoading(true);
       setErrorMessage(null);
       try {
         const startedAt = performance.now();
+        console.debug("TIP candle fetch start", {
+          symbol,
+          timeframe,
+          limit: CHART_HISTORY_LIMIT,
+          readinessBlocksRawChart: false,
+        });
         const [candles, structure, trend, alignment, health, readiness, aoiRead, aoiGate] = await Promise.all([
           fetchCandles(symbol, timeframe, { limit: CHART_HISTORY_LIMIT, signal: controller.signal }),
           fetchMarketStructure(symbol, timeframe, { limit: STRUCTURE_HISTORY_LIMIT, signal: controller.signal }),
@@ -135,10 +143,16 @@ export function VisualizationApp() {
           return;
         }
         performance.mark("tip-visualization-fetch-complete");
+        const latestCandle = candles.at(-1);
+        const latestChartTimestamp = latestCandle ? toChartTimestamp(latestCandle.open_time_ms) : null;
         console.debug("TIP visualization fetch", {
           symbol,
           timeframe,
           candles: candles.length,
+          latestOpenTimeMs: latestCandle?.open_time_ms ?? null,
+          latestChartTimestamp,
+          readinessOverallState: readiness.overall_state,
+          readinessBlocksRawChart: false,
           swings: structure.swings.length,
           bos: structure.breaks_of_structure.length,
           elapsedMs: Math.round(performance.now() - startedAt),
@@ -163,6 +177,9 @@ export function VisualizationApp() {
         if (active) {
           setLoading(false);
         }
+        if (active || controller.signal.aborted) {
+          visualizationRequestInFlightRef.current = false;
+        }
       }
     }
     void load();
@@ -176,11 +193,19 @@ export function VisualizationApp() {
     if (POLL_INTERVAL_MS <= 0) {
       return;
     }
+    console.debug("TIP visualization polling start", { symbol, timeframe, intervalMs: POLL_INTERVAL_MS });
     const interval = window.setInterval(() => {
+      if (visualizationRequestInFlightRef.current) {
+        console.debug("TIP visualization polling skipped", { symbol, timeframe, reason: "request_in_flight" });
+        return;
+      }
       setRefreshKey((value) => value + 1);
     }, POLL_INTERVAL_MS);
-    return () => window.clearInterval(interval);
-  }, []);
+    return () => {
+      window.clearInterval(interval);
+      console.debug("TIP visualization polling stopped", { symbol, timeframe });
+    };
+  }, [symbol, timeframe, aoiStateFilter]);
 
   useEffect(() => {
     let active = true;
@@ -678,7 +703,7 @@ function isReplayActive(status: ReplayStatusDto | null): boolean {
 }
 
 function replayCursorTimestamp(candles: CandleDto[], status: ReplayStatusDto | null): number | null {
-  if (!isReplayActive(status) || candles.length === 0 || status.processed_events <= 0) {
+  if (status === null || !isReplayActive(status) || candles.length === 0 || status.processed_events <= 0) {
     return null;
   }
   const cursorIndex = Math.min(status.processed_events - 1, candles.length - 1);
@@ -976,6 +1001,7 @@ function ChartCanvas({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const previousCandlesRef = useRef<CandleDto[]>([]);
   const [chartError, setChartError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -1018,11 +1044,39 @@ function ChartCanvas({
 
   useEffect(() => {
     const series = candleSeriesRef.current;
+    const chart = chartRef.current;
     if (series === null) {
       return;
     }
     const startedAt = performance.now();
-    series.setData(candles.map(toChartCandle));
+    const previousCandles = previousCandlesRef.current;
+    const previousLatest = previousCandles.at(-1);
+    const latestCandle = candles.at(-1);
+    const latestChanged = previousLatest?.open_time_ms !== latestCandle?.open_time_ms;
+    const visibleRange = chart?.timeScale().getVisibleLogicalRange() ?? null;
+    const barsInfo = visibleRange ? series.barsInLogicalRange(visibleRange) : null;
+    const wasNearRightEdge = barsInfo?.barsAfter !== undefined && barsInfo.barsAfter < 3;
+    const chartCandles = candles.map(toChartCandle);
+    const shouldResetSeries =
+      previousCandles.length === 0 ||
+      candles.length === 0 ||
+      candles.length < previousCandles.length ||
+      candles[0]?.open_time_ms !== previousCandles[0]?.open_time_ms ||
+      !candlesSharePrefix(previousCandles, candles);
+    let updateMode: "setData" | "update" | "none" = "none";
+    if (shouldResetSeries) {
+      series.setData(chartCandles);
+      updateMode = "setData";
+    } else if (latestCandle) {
+      for (const candle of candles.slice(previousCandles.length)) {
+        series.update(toChartCandle(candle));
+      }
+      if (!latestChanged || candles.length === previousCandles.length) {
+        series.update(toChartCandle(latestCandle));
+      }
+      updateMode = "update";
+    }
+    previousCandlesRef.current = candles;
     removeAllPriceLines(series);
     for (const swing of structure.swings) {
       series.createPriceLine({
@@ -1062,9 +1116,22 @@ function ChartCanvas({
         title: area.timeframe === "1w" ? "WEEKLY AOI" : "DAILY AOI",
       });
     }
-    chartRef.current?.timeScale().fitContent();
+    if (previousCandles.length === 0) {
+      chart?.timeScale().fitContent();
+    } else if (wasNearRightEdge) {
+      chart?.timeScale().scrollToRealTime();
+    } else if (visibleRange) {
+      chart?.timeScale().setVisibleLogicalRange(visibleRange);
+    }
     console.debug("TIP chart render", {
       candles: candles.length,
+      latestOpenTimeMs: latestCandle?.open_time_ms ?? null,
+      latestChartTimestamp: latestCandle ? toChartTimestamp(latestCandle.open_time_ms) : null,
+      latestChanged,
+      updateMode,
+      visibleRange,
+      barsAfter: barsInfo?.barsAfter ?? null,
+      wasNearRightEdge,
       swings: structure.swings.length,
       bos: bos.length,
       aois: aois.length,
@@ -1104,12 +1171,28 @@ function AoiOverlay({ aois, overlaps }: { aois: AoiDto[]; overlaps: AoiOverlapDt
 
 function toChartCandle(candle: CandleDto): CandlestickData<Time> {
   return {
-    time: Math.floor(candle.open_time_ms / 1000) as Time,
+    time: toChartTimestamp(candle.open_time_ms),
     open: candle.open,
     high: candle.high,
     low: candle.low,
     close: candle.close,
   };
+}
+
+function toChartTimestamp(openTimeMs: number): Time {
+  return Math.floor(openTimeMs / 1000) as Time;
+}
+
+function candlesSharePrefix(previousCandles: CandleDto[], nextCandles: CandleDto[]): boolean {
+  if (nextCandles.length > previousCandles.length) {
+    return previousCandles.every((candle, index) => candle.open_time_ms === nextCandles[index]?.open_time_ms);
+  }
+  if (nextCandles.length === previousCandles.length) {
+    return previousCandles
+      .slice(0, -1)
+      .every((candle, index) => candle.open_time_ms === nextCandles[index]?.open_time_ms);
+  }
+  return false;
 }
 
 function colorForStructureSource(timeframe: string): string {
