@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import logging
+import socket
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.api.service import create_app
+from backend.api.service import _start_runtime_in_background, create_app
 from backend.app import BackendRuntime, HistoricalRuntimeConfig, RuntimeMode, RuntimeState
 from backend.app.cli import main
 from backend.config import PlatformSettings, load_settings
@@ -982,18 +984,78 @@ def test_cli_can_run_api_mode_without_starting_server(monkeypatch: pytest.Monkey
     """Covers local API CLI wiring for RUNTIME-001 and TEST-001."""
 
     calls: list[tuple[str, int]] = []
+    preflight_calls: list[tuple[str, int]] = []
 
     def fake_run(_app: object, *, host: str, port: int) -> None:
         calls.append((host, port))
 
+    def fake_getaddrinfo(host: str, port: int) -> list[object]:
+        preflight_calls.append((host, port))
+        return [object()]
+
     import uvicorn
 
     monkeypatch.setattr(uvicorn, "run", fake_run)
+    monkeypatch.setattr("backend.app.cli.socket.getaddrinfo", fake_getaddrinfo)
 
     exit_code = main(["--api", "--dry-run", "--host", "0.0.0.0", "--port", "9000"])
 
     assert exit_code == 0
+    assert preflight_calls == [("0.0.0.0", 9000)]
     assert calls == [("0.0.0.0", 9000)]
+
+
+def test_cli_bind_preflight_failure_prevents_uvicorn_run(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    calls: list[tuple[str, int]] = []
+
+    def fake_run(_app: object, *, host: str, port: int) -> None:
+        calls.append((host, port))
+
+    def fail_getaddrinfo(host: str, port: int) -> list[object]:
+        raise socket.gaierror(11001, "getaddrinfo failed")
+
+    import uvicorn
+
+    monkeypatch.setattr(uvicorn, "run", fake_run)
+    monkeypatch.setattr("backend.app.cli.socket.getaddrinfo", fail_getaddrinfo)
+
+    with caplog.at_level(logging.ERROR, logger="backend.app.cli"), pytest.raises(socket.gaierror):
+        main(["--api", "--dry-run", "--host", "bad host", "--port", "9000"])
+
+    assert calls == []
+    assert any(
+        getattr(record, "operation", None) == "api_bind_preflight"
+        and getattr(record, "host_repr", None) == "'bad host'"
+        and record.exc_info is not None
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_background_runtime_startup_exception_logs_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    runtime = BackendRuntime(mode=RuntimeMode.DRY_RUN)
+
+    def fail_start() -> None:
+        raise RuntimeError("diagnostic startup failure")
+
+    monkeypatch.setattr(runtime, "start", fail_start)
+
+    with caplog.at_level(logging.ERROR, logger="backend.api.service"):
+        await _start_runtime_in_background(runtime)
+
+    assert runtime.state is RuntimeState.FAILED
+    assert any(
+        getattr(record, "operation", None) == "runtime_start_background"
+        and getattr(record, "exception_type", None) == "RuntimeError"
+        and record.exc_info is not None
+        for record in caplog.records
+    )
 
 
 def test_api_layer_does_not_recompute_analysis_logic() -> None:

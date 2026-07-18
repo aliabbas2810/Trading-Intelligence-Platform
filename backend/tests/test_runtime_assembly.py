@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+import backend.api.service as api_service
 import backend.app.runtime as runtime_module
 from backend.app import (
     BackendRuntime,
@@ -1006,7 +1007,10 @@ def test_live_warn_policy_repairs_known_cache_gap_before_live_handoff(tmp_path: 
     assert replay_integrity.complete
 
 
-def test_api_health_available_while_live_sync_initializes_in_background(tmp_path: Path) -> None:
+def test_api_health_available_while_live_sync_initializes_in_background(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """M31.6 keeps health reachable while long REST catch-up runs."""
 
     downloader = BlockingLiveCatchupDownloader(latest_completed_open_time_ms=120_000)
@@ -1016,6 +1020,14 @@ def test_api_health_available_while_live_sync_initializes_in_background(tmp_path
         live_stream_runner_factory=lambda client: RecordingLiveStreamRunner().bind(client),
         historical_downloader=downloader,
     )
+    logged_operations: list[str] = []
+
+    def record_service_info(_message: str, *args: object, **kwargs: object) -> None:
+        extra = kwargs.get("extra")
+        if isinstance(extra, dict) and isinstance(extra.get("operation"), str):
+            logged_operations.append(extra["operation"])
+
+    monkeypatch.setattr(api_service.LOGGER, "info", record_service_info)
 
     with TestClient(create_app(runtime)) as client:
         assert downloader.entered.wait(timeout=2.0)
@@ -1029,6 +1041,9 @@ def test_api_health_available_while_live_sync_initializes_in_background(tmp_path
 
         downloader.release.set()
         assert wait_for_state(runtime, RuntimeState.RUNNING)
+
+    assert "fastapi_lifespan_shutdown" in logged_operations
+    assert "fastapi_lifespan_shutdown_wait" in logged_operations
 
 
 def test_api_health_reports_live_startup_failure(tmp_path: Path) -> None:

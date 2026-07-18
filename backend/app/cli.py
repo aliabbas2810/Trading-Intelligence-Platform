@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import os
+import socket
+import threading
 import time
 from pathlib import Path
 
@@ -13,6 +17,9 @@ from backend.engines.historical.loader import parse_utc_timestamp_ms
 from backend.exchange import HistoricalIntegrityPolicy
 from backend.models import Timeframe
 from backend.pipelines.timeframe.aggregation import DAILY_MS, WEEKLY_MS
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -58,6 +65,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     mode = runtime_mode_from_args(args)
+    if args.api:
+        api_bind_preflight(args.host, args.port, mode)
     historical_modes = {RuntimeMode.HISTORICAL, RuntimeMode.HISTORICAL_LIVE}
     if mode in historical_modes:
         print_historical_preflight(args)
@@ -69,6 +78,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.api:
         import uvicorn
 
+        LOGGER.info(
+            "Starting Uvicorn server",
+            extra={
+                "operation": "uvicorn_run",
+                "host_repr": repr(args.host),
+                "port": args.port,
+                "process_id": os.getpid(),
+                "thread_name": threading.current_thread().name,
+                "runtime_mode": mode.value,
+            },
+        )
         uvicorn.run(create_app(runtime), host=args.host, port=args.port)
         return 0
 
@@ -96,6 +116,36 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         runtime.stop()
     return 0
+
+
+def api_bind_preflight(host: str, port: int, mode: RuntimeMode) -> None:
+    """Validate the exact API bind host before runtime construction."""
+
+    host_repr = repr(host)
+    LOGGER.info(
+        "API bind preflight starting",
+        extra={
+            "operation": "api_bind_preflight",
+            "host_repr": host_repr,
+            "port": port,
+            "runtime_mode": mode.value,
+            "thread_name": threading.current_thread().name,
+        },
+    )
+    try:
+        socket.getaddrinfo(host, port)
+    except OSError as exc:
+        LOGGER.exception(
+            "API bind preflight failed",
+            extra={
+                "operation": "api_bind_preflight",
+                "host_repr": host_repr,
+                "port": port,
+                "exception_type": type(exc).__name__,
+                "thread_name": threading.current_thread().name,
+            },
+        )
+        raise
 
 
 def runtime_mode_from_args(args: argparse.Namespace) -> RuntimeMode:

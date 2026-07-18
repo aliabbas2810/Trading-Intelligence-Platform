@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import threading
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
@@ -37,6 +39,8 @@ LOCAL_FRONTEND_ORIGINS = (
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 )
+LOGGER = logging.getLogger(__name__)
+SHUTDOWN_TASK_WAIT_DIAGNOSTIC_SECONDS = 5.0
 
 
 @asynccontextmanager
@@ -51,10 +55,80 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         start_task = getattr(app.state, "runtime_start_task", None)
+        LOGGER.info(
+            "FastAPI lifespan shutdown starting",
+            extra={
+                "operation": "fastapi_lifespan_shutdown",
+                "runtime_start_task_exists": isinstance(start_task, asyncio.Task),
+                "runtime_start_task_done": start_task.done() if isinstance(start_task, asyncio.Task) else None,
+                "runtime_start_task_cancelled": start_task.cancelled() if isinstance(start_task, asyncio.Task) else None,
+                "runtime_stop_requested": runtime.stop_requested,
+                "runtime_state": runtime.state.value,
+                "thread_name": threading.current_thread().name,
+            },
+        )
         if isinstance(start_task, asyncio.Task):
             runtime.stop()
-            with suppress(asyncio.CancelledError):
+            LOGGER.info(
+                "Waiting for background runtime startup task during shutdown",
+                extra={
+                    "operation": "fastapi_lifespan_shutdown_wait",
+                    "task_name": start_task.get_name(),
+                    "task_done": start_task.done(),
+                    "task_cancelled": start_task.cancelled(),
+                    "runtime_stop_requested": runtime.stop_requested,
+                    "thread_name": threading.current_thread().name,
+                },
+            )
+            done, pending = await asyncio.wait(
+                {start_task},
+                timeout=SHUTDOWN_TASK_WAIT_DIAGNOSTIC_SECONDS,
+            )
+            if pending:
+                LOGGER.warning(
+                    "Background runtime startup task still running during shutdown",
+                    extra={
+                        "operation": "fastapi_lifespan_shutdown_wait",
+                        "task_name": start_task.get_name(),
+                        "timeout_seconds": SHUTDOWN_TASK_WAIT_DIAGNOSTIC_SECONDS,
+                        "runtime_stop_requested": runtime.stop_requested,
+                        "thread_name": threading.current_thread().name,
+                    },
+                )
+            try:
                 await start_task
+            except asyncio.CancelledError:
+                LOGGER.info(
+                    "Background runtime startup task cancelled during shutdown",
+                    extra={
+                        "operation": "fastapi_lifespan_shutdown_wait",
+                        "task_name": start_task.get_name(),
+                        "runtime_stop_requested": runtime.stop_requested,
+                        "thread_name": threading.current_thread().name,
+                    },
+                )
+            except Exception:
+                LOGGER.exception(
+                    "Background runtime startup task raised during shutdown",
+                    extra={
+                        "operation": "fastapi_lifespan_shutdown_wait",
+                        "task_name": start_task.get_name(),
+                        "runtime_stop_requested": runtime.stop_requested,
+                        "thread_name": threading.current_thread().name,
+                    },
+                )
+                raise
+            else:
+                LOGGER.info(
+                    "Background runtime startup task completed during shutdown",
+                    extra={
+                        "operation": "fastapi_lifespan_shutdown_wait",
+                        "task_name": start_task.get_name(),
+                        "task_count_done": len(done),
+                        "runtime_stop_requested": runtime.stop_requested,
+                        "thread_name": threading.current_thread().name,
+                    },
+                )
         elif runtime.state in {RuntimeState.RUNNING, RuntimeState.STARTING, RuntimeState.FAILED}:
             runtime.stop()
 
@@ -488,11 +562,64 @@ def runtime_from_app(app: FastAPI) -> BackendRuntime:
 async def _start_runtime_in_background(runtime: BackendRuntime) -> None:
     """Start long-running live initialization without blocking API availability."""
 
+    task = asyncio.current_task()
+    LOGGER.info(
+        "Background runtime startup beginning",
+        extra={
+            "operation": "runtime_start_background",
+            "task_name": task.get_name() if task else None,
+            "thread_name": threading.current_thread().name,
+            "runtime_mode": runtime.mode.value,
+            "symbol": runtime.active_symbol,
+            "timeframe": runtime.active_timeframe.value,
+            "stop_requested": runtime.stop_requested,
+        },
+    )
     try:
         await asyncio.to_thread(runtime.start)
+    except asyncio.CancelledError:
+        LOGGER.info(
+            "Background runtime startup cancellation requested",
+            extra={
+                "operation": "runtime_start_background",
+                "task_name": task.get_name() if task else None,
+                "thread_name": threading.current_thread().name,
+                "runtime_mode": runtime.mode.value,
+                "symbol": runtime.active_symbol,
+                "timeframe": runtime.active_timeframe.value,
+                "stop_requested": runtime.stop_requested,
+            },
+        )
+        raise
     except Exception as exc:  # pragma: no cover - exercised through health surface.
+        LOGGER.exception(
+            "Background runtime startup failed",
+            extra={
+                "operation": "runtime_start_background",
+                "task_name": task.get_name() if task else None,
+                "thread_name": threading.current_thread().name,
+                "runtime_mode": runtime.mode.value,
+                "symbol": runtime.active_symbol,
+                "timeframe": runtime.active_timeframe.value,
+                "stop_requested": runtime.stop_requested,
+                "exception_type": type(exc).__name__,
+            },
+        )
         if runtime.state is not RuntimeState.FAILED:
             runtime.record_startup_failure(exc)
+    else:
+        LOGGER.info(
+            "Background runtime startup completed",
+            extra={
+                "operation": "runtime_start_background",
+                "task_name": task.get_name() if task else None,
+                "thread_name": threading.current_thread().name,
+                "runtime_mode": runtime.mode.value,
+                "symbol": runtime.active_symbol,
+                "timeframe": runtime.active_timeframe.value,
+                "stop_requested": runtime.stop_requested,
+            },
+        )
 
 
 def _validate_bounded_read_request(

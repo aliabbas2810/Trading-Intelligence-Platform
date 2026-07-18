@@ -472,11 +472,39 @@ class BackendRuntime:
     def stop(self) -> None:
         """Stop the local runtime for RUNTIME-003."""
 
+        self._logger.info(
+            "Backend runtime stop requested",
+            extra={
+                "operation": "runtime_stop",
+                "runtime_mode": self.mode.value,
+                "state": self._state.value,
+                "startup_active": self._state is RuntimeState.STARTING,
+                "thread_name": threading.current_thread().name,
+            },
+        )
         self._stop_requested.set()
         if self._live_stream_runner is not None:
+            self._logger.info(
+                "Live stream stop requested",
+                extra={
+                    "operation": "runtime_stop_live_stream",
+                    "runtime_mode": self.mode.value,
+                    "thread_name": threading.current_thread().name,
+                    "startup_active": self._state is RuntimeState.STARTING,
+                },
+            )
             self._live_stream_runner.stop()
             self._stream_status = MarketDataConnectionStatus.STOPPED
         if self.market_data_sync_coordinator is not None:
+            self._logger.info(
+                "Market data sync coordinator stop requested",
+                extra={
+                    "operation": "runtime_stop_market_data_sync",
+                    "runtime_mode": self.mode.value,
+                    "thread_name": threading.current_thread().name,
+                    "startup_active": self._state is RuntimeState.STARTING,
+                },
+            )
             self.market_data_sync_coordinator.stop()
         self._live_cache_sync = self._live_cache_sync_update(
             market_data_state=MarketDataRuntimeState.STOPPED,
@@ -484,7 +512,16 @@ class BackendRuntime:
             shutdown_time_ms=current_time_ms(),
         )
         self._state = RuntimeState.STOPPED
-        self._logger.info("Backend runtime stopped")
+        self._logger.info(
+            "Backend runtime stopped",
+            extra={
+                "operation": "runtime_stop",
+                "runtime_mode": self.mode.value,
+                "state": self._state.value,
+                "startup_active": False,
+                "thread_name": threading.current_thread().name,
+            },
+        )
 
     @property
     def requires_background_initialization(self) -> bool:
@@ -1488,6 +1525,16 @@ class BackendRuntime:
         if self.historical_config is not None:
             return self.historical_config.request.symbol
         return self.settings.market_data.symbols[0]
+
+    @property
+    def active_timeframe(self) -> Timeframe:
+        if self.historical_config is not None:
+            return self.historical_config.request.timeframe
+        return Timeframe.ONE_MINUTE
+
+    @property
+    def stop_requested(self) -> bool:
+        return self._stop_requested.is_set()
 
     @property
     def stream_enabled(self) -> bool:
