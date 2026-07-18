@@ -65,8 +65,6 @@ class ExchangeHistoricalCandleRequest:
     def __post_init__(self) -> None:
         if not self.symbol:
             raise ValueError("Historical request symbol is required")
-        if self.timeframe is not Timeframe.ONE_MINUTE:
-            raise ValueError("M31 synchronization uses 1m as canonical history")
         if self.start_time_ms < 0 or self.end_time_ms <= self.start_time_ms:
             raise ValueError("Historical request time range is invalid")
         if self.limit <= 0:

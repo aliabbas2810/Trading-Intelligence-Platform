@@ -72,19 +72,43 @@ class FakeTransport:
                 },
             }
         start = int(params["start_time"])
+        end = int(params["end_time"])
         limit = int(params["limit"])
+        step_seconds = int(params["step"]) * 60
         rows = [
             {
-                "timestamp": start + index * 60,
+                "timestamp": timestamp,
                 "open": "100",
                 "high": "110",
                 "low": "90",
                 "close": "105",
                 "volume": "1",
             }
-            for index in range(limit)
-        ]
+            for timestamp in range(start, end, step_seconds)
+        ][:limit]
         return {"data": {"klines": rows}}
+
+
+class EmptyKlineTransport(FakeTransport):
+    def get_json(self, path: str, params: dict[str, str | int]) -> object:
+        self.calls.append((path, params))
+        if path.endswith("/details"):
+            return super().get_json(path, params)
+        return {"data": {"klines": []}}
+
+
+class GapKlineTransport(FakeTransport):
+    def get_json(self, path: str, params: dict[str, str | int]) -> object:
+        payload = super().get_json(path, params)
+        if path.endswith("/details"):
+            return payload
+        if isinstance(payload, dict):
+            data = payload.get("data")
+            if isinstance(data, dict):
+                rows = data.get("klines")
+                if isinstance(rows, list) and len(rows) > 2:
+                    del rows[1]
+        return payload
 
 
 class BitMartPriceFieldTransport(FakeTransport):
@@ -148,6 +172,126 @@ def test_bitmart_historical_pagination_deduplicates_and_excludes_forming_candle(
     assert result.candles[-1].open_time_ms == NOW_MS - 60_000
     assert len({candle.open_time_ms for candle in result.candles}) == len(result.candles)
     assert result.pages >= 2
+
+
+def test_bitmart_short_historical_range_uses_one_bounded_page() -> None:
+    transport = FakeTransport()
+    adapter = BitMartFuturesMarketDataAdapter(
+        transport=transport,
+        page_size=500,
+        clock_ms=lambda: 3 * 60 * 60_000,
+    )
+    request = historical_request(start=0, end=120 * 60_000, limit=500)
+
+    result = adapter.fetch_historical_candles(request)
+
+    kline_calls = kline_calls_from(transport)
+    assert len(kline_calls) == 1
+    assert kline_calls[0]["start_time"] == 0
+    assert kline_calls[0]["end_time"] == 120 * 60
+    assert len(result.candles) == 120
+    assert len({candle.open_time_ms for candle in result.candles}) == 120
+
+
+def test_bitmart_long_historical_range_windows_by_limit_without_gaps() -> None:
+    transport = FakeTransport()
+    expected_count = 44_640
+    adapter = BitMartFuturesMarketDataAdapter(
+        transport=transport,
+        page_size=500,
+        clock_ms=lambda: (expected_count + 1) * 60_000,
+    )
+    request = historical_request(start=0, end=expected_count * 60_000, limit=500)
+
+    result = adapter.fetch_historical_candles(request)
+
+    kline_calls = kline_calls_from(transport)
+    assert len(kline_calls) == 90
+    assert result.pages == 90
+    assert len(result.candles) == expected_count
+    assert result.candles[0].open_time_ms == 0
+    assert result.candles[-1].open_time_ms == (expected_count - 1) * 60_000
+    assert [call["start_time"] for call in kline_calls[:3]] == [0, 30_000, 60_000]
+    assert kline_calls[-1]["end_time"] == expected_count * 60
+    assert len({candle.open_time_ms for candle in result.candles}) == expected_count
+
+
+def test_bitmart_final_partial_page_continues_to_requested_end() -> None:
+    transport = FakeTransport()
+    expected_count = 1_001
+    adapter = BitMartFuturesMarketDataAdapter(
+        transport=transport,
+        page_size=500,
+        clock_ms=lambda: (expected_count + 1) * 60_000,
+    )
+    request = historical_request(start=0, end=expected_count * 60_000, limit=500)
+
+    result = adapter.fetch_historical_candles(request)
+
+    kline_calls = kline_calls_from(transport)
+    assert len(kline_calls) == 3
+    assert len(result.candles) == expected_count
+    assert kline_calls[-1]["start_time"] == 60_000
+    assert kline_calls[-1]["end_time"] == 60_060
+
+
+def test_bitmart_pagination_is_timeframe_aware_for_five_minute_candles() -> None:
+    transport = FakeTransport()
+    adapter = BitMartFuturesMarketDataAdapter(
+        transport=transport,
+        page_size=2,
+        clock_ms=lambda: 30 * 60_000,
+    )
+    request = historical_request(start=0, end=25 * 60_000, timeframe=Timeframe.FIVE_MINUTE, limit=2)
+
+    result = adapter.fetch_historical_candles(request)
+
+    kline_calls = kline_calls_from(transport)
+    assert [call["step"] for call in kline_calls] == [5, 5, 5]
+    assert [call["start_time"] for call in kline_calls] == [0, 600, 1_200]
+    assert len(result.candles) == 5
+    assert result.candles[-1].open_time_ms == 20 * 60_000
+
+
+def test_bitmart_pagination_rejects_non_contiguous_page_data() -> None:
+    adapter = BitMartFuturesMarketDataAdapter(
+        transport=GapKlineTransport(),
+        page_size=500,
+        clock_ms=lambda: 10 * 60_000,
+    )
+    request = historical_request(start=0, end=5 * 60_000, limit=500)
+
+    with pytest.raises(RuntimeError, match="not contiguous"):
+        adapter.fetch_historical_candles(request)
+
+
+def test_bitmart_empty_historical_page_reports_exact_window() -> None:
+    adapter = BitMartFuturesMarketDataAdapter(
+        transport=EmptyKlineTransport(),
+        page_size=500,
+        clock_ms=lambda: 10 * 60_000,
+    )
+    request = historical_request(start=0, end=5 * 60_000, limit=500)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        adapter.fetch_historical_candles(request)
+
+    message = str(exc_info.value)
+    assert "zero candles" in message
+    assert "page_start_time_ms=0" in message
+    assert "page_end_time_ms=300000" in message
+
+
+def test_bitmart_pagination_rejects_non_advancing_cursor() -> None:
+    adapter = NonAdvancingCursorAdapter(
+        transport=FakeTransport(),
+        page_size=500,
+        clock_ms=lambda: 10 * 60_000,
+    )
+    request = historical_request(start=0, end=5 * 60_000, limit=500)
+
+    with pytest.raises(RuntimeError, match="cursor did not advance"):
+        adapter.fetch_historical_candles(request)
 
 
 def test_bitmart_historical_parser_accepts_real_price_field_names() -> None:
@@ -402,6 +546,33 @@ class FakeAdapter:
 
     def get_rate_limit_metadata(self) -> RateLimitMetadata:
         return RateLimitMetadata(requests_per_second=1.0, page_size=500)
+
+
+class NonAdvancingCursorAdapter(BitMartFuturesMarketDataAdapter):
+    def fetch_historical_candle_page(self, request: ExchangeHistoricalCandleRequest) -> CandlePage:
+        return CandlePage(candles=(candle(request.start_time_ms),), next_start_time_ms=request.start_time_ms, complete=False)
+
+
+def historical_request(
+    *,
+    start: int,
+    end: int,
+    timeframe: Timeframe = Timeframe.ONE_MINUTE,
+    limit: int = 500,
+) -> ExchangeHistoricalCandleRequest:
+    return ExchangeHistoricalCandleRequest(
+        exchange=ExchangeName.BITMART,
+        market_type=MarketType.USDT_M_PERPETUAL,
+        symbol="BTCUSDT",
+        timeframe=timeframe,
+        start_time_ms=start,
+        end_time_ms=end,
+        limit=limit,
+    )
+
+
+def kline_calls_from(transport: FakeTransport) -> list[dict[str, str | int]]:
+    return [params for path, params in transport.calls if path.endswith("/kline")]
 
 
 def planner_for(store: InMemoryCandleHistoryStore) -> IncrementalSyncPlanner:

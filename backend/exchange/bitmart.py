@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from time import sleep, time
 from typing import Callable, Protocol, cast
@@ -24,6 +25,7 @@ from backend.pipelines.timeframe.aggregation import timeframe_duration_ms
 
 BITMART_FUTURES_BASE_URL = "https://api-cloud-v2.bitmart.com"
 ONE_MINUTE_MS = 60_000
+LOGGER = logging.getLogger(__name__)
 
 
 class HttpTransport(Protocol):
@@ -106,28 +108,69 @@ class BitMartFuturesMarketDataAdapter:
         candles: dict[int, Candle] = {}
         pages = 0
         cursor = request.start_time_ms
+        duration_ms = timeframe_duration_ms(request.timeframe)
+        window_ms = duration_ms * min(request.limit, self._page_size)
         latest_completed = self.fetch_latest_completed_candle_time(request.symbol)
-        end_time_ms = min(request.end_time_ms, latest_completed + ONE_MINUTE_MS)
+        end_time_ms = min(request.end_time_ms, latest_completed + duration_ms)
         while cursor < end_time_ms:
+            page_end_time_ms = min(cursor + window_ms, end_time_ms)
             page_request = ExchangeHistoricalCandleRequest(
                 exchange=request.exchange,
                 market_type=request.market_type,
                 symbol=request.symbol,
                 timeframe=request.timeframe,
                 start_time_ms=cursor,
-                end_time_ms=end_time_ms,
+                end_time_ms=page_end_time_ms,
                 limit=request.limit,
             )
             page = self.fetch_historical_candle_page(page_request)
             pages += 1
+            if not page.candles:
+                raise RuntimeError(
+                    "BitMart historical page returned zero candles "
+                    f"symbol={request.symbol} timeframe={request.timeframe.value} "
+                    f"page_start_time_ms={cursor} page_end_time_ms={page_end_time_ms} "
+                    f"limit={min(request.limit, self._page_size)} http_status=200",
+                )
             for candle in page.candles:
                 candles[candle.open_time_ms] = candle
-            if page.next_start_time_ms is None or not page.candles:
+            next_cursor = page.next_start_time_ms
+            LOGGER.info(
+                "Fetched BitMart historical candle page",
+                extra={
+                    "symbol": request.symbol,
+                    "timeframe": request.timeframe.value,
+                    "page_start_time_ms": cursor,
+                    "page_end_time_ms": page_end_time_ms,
+                    "limit": min(request.limit, self._page_size),
+                    "http_status": 200,
+                    "returned_candle_count": len(page.candles),
+                    "next_cursor_time_ms": next_cursor,
+                    "total_accumulated_candle_count": len(candles),
+                },
+            )
+            if next_cursor is None:
+                if page_end_time_ms < end_time_ms:
+                    raise RuntimeError(
+                        "BitMart historical pagination stopped before requested range ended "
+                        f"symbol={request.symbol} timeframe={request.timeframe.value} "
+                        f"page_start_time_ms={cursor} page_end_time_ms={page_end_time_ms} "
+                        f"requested_end_time_ms={end_time_ms}",
+                    )
                 break
-            cursor = page.next_start_time_ms
+            if next_cursor <= cursor:
+                raise RuntimeError(
+                    "BitMart historical pagination cursor did not advance "
+                    f"symbol={request.symbol} timeframe={request.timeframe.value} "
+                    f"page_start_time_ms={cursor} page_end_time_ms={page_end_time_ms} "
+                    f"next_cursor_time_ms={next_cursor}",
+                )
+            cursor = next_cursor
+        sorted_candles = tuple(candles[key] for key in sorted(candles))
+        self._validate_contiguous_candles(sorted_candles, request, end_time_ms, duration_ms)
         return HistoricalCandleResult(
             request=request,
-            candles=tuple(candles[key] for key in sorted(candles)),
+            candles=sorted_candles,
             pages=pages,
             latest_completed_time_ms=latest_completed,
         )
@@ -141,7 +184,7 @@ class BitMartFuturesMarketDataAdapter:
         path = "/contract/public/kline"
         params: dict[str, str | int] = {
             "symbol": self.exchange_symbol_for(request.symbol),
-            "step": 1,
+            "step": duration_ms // ONE_MINUTE_MS,
             "start_time": request.start_time_ms // 1000,
             "end_time": request.end_time_ms // 1000,
             "limit": limit,
@@ -171,10 +214,10 @@ class BitMartFuturesMarketDataAdapter:
                 "parsed_candle_count=0",
             ) from exc
         if not candles or len(candles) < limit:
-            return CandlePage(candles=candles, next_start_time_ms=None, complete=True)
+            return CandlePage(candles=candles, next_start_time_ms=request.end_time_ms, complete=True)
         return CandlePage(
             candles=candles,
-            next_start_time_ms=candles[-1].open_time_ms + duration_ms,
+            next_start_time_ms=request.end_time_ms,
             complete=False,
         )
 
@@ -219,6 +262,29 @@ class BitMartFuturesMarketDataAdapter:
             raise last_error
         raise RuntimeError("BitMart request failed without an exception")
 
+    def _validate_contiguous_candles(
+        self,
+        candles: tuple[Candle, ...],
+        request: ExchangeHistoricalCandleRequest,
+        end_time_ms: int,
+        duration_ms: int,
+    ) -> None:
+        expected_time = request.start_time_ms
+        for candle in candles:
+            if candle.open_time_ms != expected_time:
+                raise RuntimeError(
+                    "BitMart historical candles are not contiguous "
+                    f"symbol={request.symbol} timeframe={request.timeframe.value} "
+                    f"expected_open_time_ms={expected_time} actual_open_time_ms={candle.open_time_ms}",
+                )
+            expected_time += duration_ms
+        if candles and expected_time < end_time_ms:
+            raise RuntimeError(
+                "BitMart historical candles ended before requested range "
+                f"symbol={request.symbol} timeframe={request.timeframe.value} "
+                f"expected_next_open_time_ms={expected_time} requested_end_time_ms={end_time_ms}",
+            )
+
     def _contract_rows(self, payload: object) -> tuple[dict[str, object], ...]:
         data = self._payload_data(payload)
         rows = data.get("symbols") or data.get("contracts") or data.get("data")
@@ -228,7 +294,7 @@ class BitMartFuturesMarketDataAdapter:
 
     def _kline_rows(self, payload: object) -> tuple[dict[str, object], ...]:
         data = self._payload_data(payload)
-        rows = data.get("klines") or data.get("kline") or data.get("data")
+        rows = first_present(data, "klines", "kline", "data")
         if not isinstance(rows, list):
             raise ValueError("BitMart kline response missing klines list")
         return tuple(cast(dict[str, object], row) for row in rows if isinstance(row, dict))
@@ -355,3 +421,10 @@ def flatten_metadata(raw: dict[str, object]) -> dict[str, str | int | float | bo
 
 def truncate_text(value: str, *, limit: int = 1000) -> str:
     return value if len(value) <= limit else f"{value[:limit]}...<truncated>"
+
+
+def first_present(payload: dict[str, object], *keys: str) -> object:
+    for key in keys:
+        if key in payload:
+            return payload[key]
+    return None

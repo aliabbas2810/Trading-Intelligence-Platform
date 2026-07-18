@@ -34,6 +34,29 @@ def test_historical_file_store_round_trips_candles(tmp_path: Path) -> None:
     assert loaded == candles
 
 
+def test_historical_file_store_sorts_deduplicates_and_rejects_empty_cache(tmp_path: Path) -> None:
+    request = make_request()
+    store = HistoricalCandleFileStore(tmp_path)
+    candles = make_fixture_candles(count=4)
+
+    path = store.save(request, (candles[2], candles[0], candles[2], candles[1]))
+    loaded = store.load(request)
+
+    assert loaded == (candles[0], candles[1], candles[2])
+    assert path.read_text(encoding="utf-8").count("\n") == 3
+
+    empty_request = HistoricalCandleRequest(
+        symbol="BTCUSDT",
+        timeframe=Timeframe.ONE_MINUTE,
+        start_time_ms=10_000,
+        end_time_ms=20_000,
+    )
+    empty_path = store.path_for(empty_request)
+    with pytest.raises(ValueError, match="Refusing to create empty"):
+        store.save(empty_request, ())
+    assert not empty_path.exists()
+
+
 def test_bitmart_kline_row_normalizes_to_canonical_candle() -> None:
     """Covers M27/M31.1 BitMart candle normalization without network access."""
 

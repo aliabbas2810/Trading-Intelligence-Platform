@@ -62,9 +62,13 @@ class HistoricalCandleFileStore:
 
     def save(self, request: HistoricalCandleRequest, candles: Iterable[Candle]) -> Path:
         path = self.path_for(request)
+        candle_by_open_time = {candle.open_time_ms: candle for candle in candles}
+        sorted_candles = tuple(candle_by_open_time[open_time] for open_time in sorted(candle_by_open_time))
+        if not sorted_candles:
+            raise ValueError(f"Refusing to create empty historical candle cache at {path}")
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8") as file:
-            for candle in candles:
+            for candle in sorted_candles:
                 payload = asdict(candle)
                 payload["timeframe"] = candle.timeframe.value
                 file.write(json.dumps(payload, sort_keys=True))
