@@ -32,6 +32,7 @@ from backend.exchange import (
     MarketType,
 )
 from backend.models import Candle, Timeframe, Trade
+from backend.pipelines.candle import CandleClosedEvent, CandleEventSource
 from backend.pipelines.market_data import BitMartTradeStreamClient, MarketDataConnectionStatus, TradeReceivedEvent
 
 
@@ -414,6 +415,126 @@ def test_live_bitmart_persists_finalized_live_candle_as_segment(tmp_path: Path) 
     components = {component.name: component for component in runtime.health().components}
     assert segment.exists()
     assert components["last_persisted_candle_open_time_ms"].message == "60000"
+
+
+def test_historical_replay_candle_event_does_not_invoke_live_persistence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Historical replay must feed analysis without being persisted as live data."""
+
+    persisted: list[Candle] = []
+
+    def record_persist(self: HistoricalCandleFileStore, candle: Candle, *, exchange: str, market_type: str) -> Path:
+        persisted.append(candle)
+        return tmp_path / "unexpected.jsonl"
+
+    monkeypatch.setattr(HistoricalCandleFileStore, "save_candle_segment", record_persist)
+    runtime = BackendRuntime(settings=live_enabled_settings(data_root=tmp_path), mode=RuntimeMode.LIVE_BITMART)
+    runtime._subscribe_components()
+    observed: list[CandleClosedEvent] = []
+    runtime.event_bus.subscribe(CandleClosedEvent, observed.append)
+
+    for open_time_ms in range(0, 300_000, 60_000):
+        runtime.event_bus.publish(
+            CandleClosedEvent(
+                candle=candle_for_open_time("BTCUSDT", open_time_ms),
+                source=CandleEventSource.HISTORICAL_REPLAY,
+            )
+        )
+
+    assert persisted == []
+    assert len(observed) == 5
+    assert len(runtime.visualization_api.get_candles("BTCUSDT", Timeframe.ONE_MINUTE)) == 5
+    assert len(runtime.visualization_api.get_candles("BTCUSDT", Timeframe.FIVE_MINUTE)) == 1
+
+
+def test_live_stream_candle_event_invokes_live_persistence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only LIVE_STREAM 1m events use the append-friendly live persistence path."""
+
+    persisted: list[Candle] = []
+
+    def record_persist(self: HistoricalCandleFileStore, candle: Candle, *, exchange: str, market_type: str) -> Path:
+        persisted.append(candle)
+        return tmp_path / "live.jsonl"
+
+    monkeypatch.setattr(HistoricalCandleFileStore, "save_candle_segment", record_persist)
+    runtime = BackendRuntime(settings=live_enabled_settings(data_root=tmp_path), mode=RuntimeMode.LIVE_BITMART)
+
+    runtime._handle_candle_closed(
+        CandleClosedEvent(
+            candle=candle_for_open_time("BTCUSDT", 0),
+            source=CandleEventSource.LIVE_STREAM,
+        )
+    )
+
+    assert [candle.open_time_ms for candle in persisted] == [0]
+
+
+def test_non_one_minute_live_candle_event_does_not_use_one_minute_persistence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Higher timeframe live events are not written through the 1m daily segment path."""
+
+    persisted: list[Candle] = []
+
+    def record_persist(self: HistoricalCandleFileStore, candle: Candle, *, exchange: str, market_type: str) -> Path:
+        persisted.append(candle)
+        return tmp_path / "unexpected.jsonl"
+
+    monkeypatch.setattr(HistoricalCandleFileStore, "save_candle_segment", record_persist)
+    runtime = BackendRuntime(settings=live_enabled_settings(data_root=tmp_path), mode=RuntimeMode.LIVE_BITMART)
+
+    runtime._handle_candle_closed(
+        CandleClosedEvent(
+            candle=candle_for_timeframe("BTCUSDT", Timeframe.FOUR_HOUR, 0),
+            source=CandleEventSource.LIVE_STREAM,
+        )
+    )
+
+    assert persisted == []
+
+
+def test_publish_historical_candle_uses_replay_provenance() -> None:
+    """Historical replay publishers must not rely on the event's live default provenance."""
+
+    runtime = BackendRuntime(mode=RuntimeMode.DRY_RUN)
+    observed: list[CandleClosedEvent] = []
+    runtime.event_bus.subscribe(CandleClosedEvent, observed.append)
+
+    runtime._publish_historical_candle(candle_for_open_time("BTCUSDT", 0))
+
+    assert observed[0].source is CandleEventSource.HISTORICAL_REPLAY
+
+
+def test_one_year_historical_replay_events_produce_zero_live_persistence_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A one-year replay event volume must not trigger any live cache writes."""
+
+    persisted_count = 0
+
+    def record_persist(self: HistoricalCandleFileStore, candle: Candle, *, exchange: str, market_type: str) -> Path:
+        nonlocal persisted_count
+        persisted_count += 1
+        return tmp_path / "unexpected.jsonl"
+
+    monkeypatch.setattr(HistoricalCandleFileStore, "save_candle_segment", record_persist)
+    runtime = BackendRuntime(settings=live_enabled_settings(data_root=tmp_path), mode=RuntimeMode.LIVE_BITMART)
+    event = CandleClosedEvent(
+        candle=candle_for_open_time("BTCUSDT", 0),
+        source=CandleEventSource.HISTORICAL_REPLAY,
+    )
+
+    for _ in range(365 * 24 * 60):
+        runtime._handle_candle_closed(event)
+
+    assert persisted_count == 0
 
 
 def test_live_bitmart_health_reports_stream_fields(tmp_path: Path) -> None:
@@ -1264,6 +1385,22 @@ def candle_for_open_time(symbol: str, open_time_ms: int) -> Candle:
         low=open_price - 1.0,
         close=close,
         volume=1.0,
+    )
+
+
+def candle_for_timeframe(symbol: str, timeframe: Timeframe, open_time_ms: int) -> Candle:
+    duration_ms = 4 * 60 * 60 * 1000 if timeframe is Timeframe.FOUR_HOUR else 60_000
+    candle = candle_for_open_time(symbol, open_time_ms)
+    return Candle(
+        symbol=candle.symbol,
+        timeframe=timeframe,
+        open_time_ms=open_time_ms,
+        close_time_ms=open_time_ms + duration_ms,
+        open=candle.open,
+        high=candle.high,
+        low=candle.low,
+        close=candle.close,
+        volume=candle.volume,
     )
 
 

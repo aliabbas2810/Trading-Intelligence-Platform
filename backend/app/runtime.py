@@ -81,7 +81,7 @@ from backend.exchange import (
     MarketType,
 )
 from backend.models import Candle, Timeframe, Trade
-from backend.pipelines.candle import CandleClosedEvent, OneMinuteCandlePipeline
+from backend.pipelines.candle import CandleClosedEvent, CandleEventSource, OneMinuteCandlePipeline
 from backend.pipelines.market_data import (
     BITMART_FUTURES_PUBLIC_WS_URL,
     BITMART_FUTURES_TRADE_CHANNEL,
@@ -1976,7 +1976,7 @@ class BackendRuntime:
         """Publish completed historical candles through existing runtime paths."""
 
         if candle.timeframe is Timeframe.ONE_MINUTE:
-            self.event_bus.publish(CandleClosedEvent(candle=candle))
+            self.event_bus.publish(CandleClosedEvent(candle=candle, source=CandleEventSource.HISTORICAL_REPLAY))
             return
         self._ensure_candle_stored(candle)
         self.event_bus.publish(TimeframeCandleClosedEvent(candle=candle))
@@ -2000,9 +2000,19 @@ class BackendRuntime:
 
         sorted_candles = tuple(sorted(candles, key=lambda item: (item.timeframe.value, item.open_time_ms)))
         one_minute_candles = tuple(candle for candle in sorted_candles if candle.timeframe is Timeframe.ONE_MINUTE)
+        replay_started = time.perf_counter()
+        progress_interval = max(1, min(50_000, len(one_minute_candles) // 10 or 1))
+        self._logger.info(
+            "Historical replay started symbol=%s timeframe=%s candle_count=%s source_start_ms=%s source_end_ms=%s",
+            source_request.symbol,
+            source_request.timeframe.value,
+            len(one_minute_candles),
+            source_request.start_time_ms,
+            source_request.end_time_ms,
+        )
         gaps: list[HistoricalDataGap] = []
         previous: Candle | None = None
-        for candle in one_minute_candles:
+        for index, candle in enumerate(one_minute_candles, start=1):
             if previous is not None and candle.open_time_ms != previous.close_time_ms:
                 missing_times = tuple(range(previous.close_time_ms, candle.open_time_ms, 60_000))
                 gap = historical_gap_from_missing_times(source_request, missing_times)
@@ -2028,7 +2038,24 @@ class BackendRuntime:
                     )
                 self._handle_historical_replay_gap(previous, candle, gap, integrity_policy)
             self._publish_historical_candle(candle)
+            if index == len(one_minute_candles) or index % progress_interval == 0:
+                self._logger.info(
+                    "Historical replay progress symbol=%s timeframe=%s processed=%s total=%s",
+                    source_request.symbol,
+                    source_request.timeframe.value,
+                    index,
+                    len(one_minute_candles),
+                )
             previous = candle
+
+        elapsed_ms = int((time.perf_counter() - replay_started) * 1000)
+        self._logger.info(
+            "Historical replay completed symbol=%s timeframe=%s candle_count=%s elapsed_ms=%s",
+            source_request.symbol,
+            source_request.timeframe.value,
+            len(one_minute_candles),
+            elapsed_ms,
+        )
 
         if not gaps:
             self._replay_integrity_report = inferred_integrity_report(
@@ -2425,7 +2452,11 @@ class BackendRuntime:
     def _handle_candle_closed(self, event: CandleClosedEvent) -> None:
         self._ensure_candle_stored(event.candle)
         if self.mode in {RuntimeMode.LIVE_BITMART, RuntimeMode.HISTORICAL_LIVE}:
-            if self.mode is RuntimeMode.LIVE_BITMART and event.candle.timeframe is Timeframe.ONE_MINUTE:
+            if (
+                self.mode is RuntimeMode.LIVE_BITMART
+                and event.candle.timeframe is Timeframe.ONE_MINUTE
+                and event.source is CandleEventSource.LIVE_STREAM
+            ):
                 self._persist_live_closed_candle(event.candle)
             self._live_cache_sync = self._live_cache_sync_update(
                 last_finalized_candle_open_time_ms=event.candle.open_time_ms,
