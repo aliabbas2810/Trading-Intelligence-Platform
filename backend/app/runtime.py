@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-import threading
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -39,7 +37,7 @@ from backend.engines.entry import DecisionTrace, EntrySignalEngine, EntrySignalI
 from backend.engines.intelligence import TradingIntelligenceResult
 from backend.engines.readiness import AnalysisReadiness, AnalysisReadinessEngine
 from backend.engines.historical import (
-    BinanceHistoricalCandleDownloader,
+    BitMartHistoricalCandleDownloader,
     HistoricalCandleFileStore,
     HistoricalCandleLoader,
     HistoricalCandleRequest,
@@ -69,9 +67,8 @@ from backend.exchange import BitMartFuturesMarketDataAdapter, ExchangeName, Mark
 from backend.models import Candle, Timeframe, Trade
 from backend.pipelines.candle import CandleClosedEvent, OneMinuteCandlePipeline
 from backend.pipelines.market_data import (
-    BinanceTradeStreamClient,
-    BinanceTradeStreamClientConfig,
-    BinanceTradeMessageParser,
+    BitMartTradeStreamClient,
+    BitMartTradeStreamClientConfig,
     EventBusMarketDataPipeline,
     MarketDataConnectionStatus,
     MarketDataStatusEvent,
@@ -91,7 +88,7 @@ from backend.app.replay_runtime import ReplaySourceType, ReplayStatusSnapshot, R
 
 class RuntimeMode(str, Enum):
     DRY_RUN = "dry_run"
-    LIVE_BINANCE = "live_binance"
+    LIVE_BITMART = "live_bitmart"
     HISTORICAL = "historical"
     HISTORICAL_LIVE = "historical_live"
 
@@ -156,29 +153,20 @@ class LiveStreamRunner(Protocol):
         """Stop live market data streaming."""
 
 
-class BinanceLiveStreamRunner:
-    """Background runner for the async Binance stream client under FR-101 and FR-102."""
+class BitMartUnavailableLiveStreamRunner:
+    """Reports BitMart live stream status until WebSocket ingestion is implemented."""
 
-    def __init__(self, client: BinanceTradeStreamClient) -> None:
+    def __init__(self, client: BitMartTradeStreamClient) -> None:
         self._client = client
-        self._thread: threading.Thread | None = None
 
     def start(self) -> None:
-        """Start Binance streaming without blocking runtime startup."""
-
-        if self._thread is not None and self._thread.is_alive():
-            return
-        self._thread = threading.Thread(target=self._run_client, daemon=True)
-        self._thread.start()
+        self._client.start_unavailable()
 
     def stop(self) -> None:
         self._client.stop()
 
-    def _run_client(self) -> None:
-        asyncio.run(self._client.run())
 
-
-LiveStreamRunnerFactory = Callable[[BinanceTradeStreamClient], LiveStreamRunner]
+LiveStreamRunnerFactory = Callable[[BitMartTradeStreamClient], LiveStreamRunner]
 
 
 class BoundaryFilteringMarketDataPipeline(EventBusMarketDataPipeline):
@@ -218,14 +206,13 @@ class BackendRuntime:
         )
         self.event_bus = EventBus()
         self.candle_store = InMemoryCandleStore()
-        self.market_data_parser = BinanceTradeMessageParser()
         self._historical_live_min_trade_timestamp_ms: int | None = None
         self.market_data_pipeline = BoundaryFilteringMarketDataPipeline(
             self.event_bus,
             self._accept_trade_for_runtime,
         )
-        self.binance_stream_client = self._build_binance_stream_client()
-        self._live_stream_runner_factory = live_stream_runner_factory or BinanceLiveStreamRunner
+        self.bitmart_stream_client = self._build_bitmart_stream_client()
+        self._live_stream_runner_factory = live_stream_runner_factory or BitMartUnavailableLiveStreamRunner
         self._live_stream_runner: LiveStreamRunner | None = None
         self._stream_status = MarketDataConnectionStatus.STOPPED
         self.candle_pipeline = OneMinuteCandlePipeline(self.event_bus, self.candle_store)
@@ -313,11 +300,13 @@ class BackendRuntime:
             ComponentHealth("candle_storage", status, "in-memory candle store"),
             ComponentHealth("market_data_pipeline", status, "event bus publisher foundation"),
             ComponentHealth(
-                "binance_stream_client",
-                self._binance_component_status(status),
-                self._binance_component_message(),
+                "bitmart_stream_client",
+                self._bitmart_component_status(status),
+                self._bitmart_component_message(),
             ),
             ComponentHealth("market_data_mode", ComponentStatus.READY, self.mode.value),
+            ComponentHealth("exchange", ComponentStatus.READY, self.settings.market_data.exchange),
+            ComponentHealth("market_type", ComponentStatus.READY, self.settings.market_data.market_type),
             ComponentHealth("stream_enabled", ComponentStatus.READY, str(self.stream_enabled)),
             ComponentHealth("stream_status", ComponentStatus.READY, self._stream_status.value),
             ComponentHealth("active_symbol", ComponentStatus.READY, self.active_symbol),
@@ -902,7 +891,7 @@ class BackendRuntime:
     @property
     def stream_enabled(self) -> bool:
         return (
-            self.mode in {RuntimeMode.LIVE_BINANCE, RuntimeMode.HISTORICAL_LIVE}
+            self.mode in {RuntimeMode.LIVE_BITMART, RuntimeMode.HISTORICAL_LIVE}
             and self.settings.market_data.live_enabled
         )
 
@@ -945,15 +934,12 @@ class BackendRuntime:
             return ()
         return tuple(status.canonical_symbol for status in self.market_data_sync_coordinator.status().symbols)
 
-    def _build_binance_stream_client(self) -> BinanceTradeStreamClient:
-        return BinanceTradeStreamClient(
-            config=BinanceTradeStreamClientConfig(
+    def _build_bitmart_stream_client(self) -> BitMartTradeStreamClient:
+        return BitMartTradeStreamClient(
+            config=BitMartTradeStreamClientConfig(
                 symbol=self.active_symbol if hasattr(self, "settings") else "",
-                reconnect_delay_seconds=self.settings.market_data.reconnect_delay_seconds,
-                max_reconnect_attempts=self.settings.market_data.max_reconnect_attempts,
             ),
             event_bus=self.event_bus,
-            parser=self.market_data_parser,
             pipeline=self.market_data_pipeline,
         )
 
@@ -1000,7 +986,7 @@ class BackendRuntime:
     def _start_live_stream_if_enabled(self) -> None:
         if not self.stream_enabled:
             return
-        self._live_stream_runner = self._live_stream_runner_factory(self.binance_stream_client)
+        self._live_stream_runner = self._live_stream_runner_factory(self.bitmart_stream_client)
         self._live_stream_runner.start()
 
     def _load_historical_data_if_enabled(self) -> None:
@@ -1028,7 +1014,7 @@ class BackendRuntime:
         if not self.historical_config.download:
             return store.load(self.historical_config.request)
 
-        downloader = BinanceHistoricalCandleDownloader()
+        downloader = BitMartHistoricalCandleDownloader()
         candles = downloader.load(self.historical_config.request)
         store.save(self.historical_config.request, candles)
         return candles
@@ -1180,21 +1166,25 @@ class BackendRuntime:
     def _handle_market_data_status(self, event: MarketDataStatusEvent) -> None:
         self._stream_status = event.status
 
-    def _binance_component_status(self, fallback: ComponentStatus) -> ComponentStatus:
+    def _bitmart_component_status(self, fallback: ComponentStatus) -> ComponentStatus:
         if self.mode in {RuntimeMode.DRY_RUN, RuntimeMode.HISTORICAL}:
             return ComponentStatus.DISABLED
         if not self.settings.market_data.live_enabled:
             return ComponentStatus.DISABLED
+        if self._stream_status is MarketDataConnectionStatus.ERROR:
+            return ComponentStatus.STOPPED
         return fallback
 
-    def _binance_component_message(self) -> str:
+    def _bitmart_component_message(self) -> str:
         if self.mode is RuntimeMode.DRY_RUN:
             return "disabled in dry-run mode"
         if self.mode is RuntimeMode.HISTORICAL:
             return "disabled in historical mode"
         if not self.settings.market_data.live_enabled:
             return "disabled by config"
-        return f"{self.settings.market_data.exchange}:{self.active_symbol}"
+        if self._stream_status is MarketDataConnectionStatus.ERROR:
+            return "bitmart_live_stream_unavailable"
+        return f"bitmart:{self.settings.market_data_sync.market_type}:{self.active_symbol}"
 
     def _demo_component_status(self) -> ComponentStatus:
         if not self.demo_data_enabled:

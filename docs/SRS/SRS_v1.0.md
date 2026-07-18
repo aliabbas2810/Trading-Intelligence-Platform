@@ -42,7 +42,7 @@ This document defines what the platform must do. Architecture details belong in 
 
 ### 1.2 Scope
 
-Version 1 includes live Binance Spot market data, trade aggregation, 1-minute candle generation, higher timeframe generation, market structure detection, trend detection, local deployment, structured logging, persistence, replay compatibility, and real-time visualization.
+Version 1 includes BitMart USDT-M market data, trade aggregation, 1-minute candle generation, higher timeframe generation, market structure detection, trend detection, local deployment, structured logging, persistence, replay compatibility, and real-time visualization.
 
 Version 1 excludes automated trade execution, broker integration, portfolio optimisation, cloud deployment, user authentication, reinforcement learning, GPU acceleration, and HFT-level optimisation.
 
@@ -97,7 +97,7 @@ The system shall be live-first and replay-compatible. Live and replay modes must
 
 | ID | Assumption |
 |---|---|
-| AS-001 | Binance Spot market data is available. |
+| AS-001 | BitMart USDT-M public market data is available. |
 | AS-002 | BTC/USDT is the first supported symbol. |
 | AS-003 | All internal timestamps use UTC. |
 | AS-004 | Users understand basic market structure concepts. |
@@ -109,7 +109,7 @@ The system shall be live-first and replay-compatible. Live and replay modes must
 | CON-001 | Market structure must use completed candles only. |
 | CON-002 | HH, HL, LH, LL, and BOS must be calculated from candle bodies only. |
 | CON-003 | Candle wicks must be preserved for visualization and future SL/TP logic. |
-| CON-004 | The platform must not depend on Binance or TradingView charts for overlays. |
+| CON-004 | The platform must not depend on exchange or TradingView charts for overlays. |
 | CON-005 | AI components must consume structured analytical outputs, not raw ambiguous chart data. |
 
 ---
@@ -118,9 +118,9 @@ The system shall be live-first and replay-compatible. Live and replay modes must
 
 ### 4.1 FR-100 Market Data Pipeline
 
-#### FR-101 — Connect to Binance Trade Stream
+#### FR-101 — BitMart Market Data Foundation
 Priority: Mandatory  
-Requirement: The platform shall connect to the Binance Spot trade stream for supported symbols.  
+Requirement: The platform shall use BitMart USDT-M futures market data for supported symbols.  
 Rationale: Live trade data is the source of all downstream analysis.  
 Dependencies: None  
 Acceptance Criteria: Connection is established and real-time trade messages are received.  
@@ -503,7 +503,7 @@ Milestone: M8
 
 #### FR-901 — Support Multi-Symbol Analysis
 Priority: Future  
-Requirement: The platform shall support analysis of multiple Binance symbols.  
+Requirement: The platform shall support analysis of multiple BitMart USDT-M symbols.  
 Rationale: The long-term goal is to scan all pairs for high-quality setups.  
 Dependencies: FR-101, FR-501  
 Acceptance Criteria: Multiple symbols can run independent pipelines.  
@@ -653,7 +653,7 @@ Milestone: M10
 
 Version 1 is accepted when:
 
-1. BTC/USDT live trades are received from Binance.
+1. BTC/USDT market data is received or loaded from BitMart.
 2. One-minute candles are generated accurately and continuously.
 3. Candles are stored in memory and persisted to disk.
 4. 4H, daily, and weekly candles are generated from one-minute candles.
@@ -693,4 +693,3 @@ Version 1 is accepted when:
 | ADR-004 | Use pipelines for transformation and engines for analysis. | Accepted |
 | ADR-005 | Use MarketContext as canonical analytical object. | Accepted |
 | ADR-006 | AI consumes structured MarketContext, not raw charts. | Accepted |
-

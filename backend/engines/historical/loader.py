@@ -6,15 +6,17 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, cast
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 
+from backend.exchange import (
+    BitMartFuturesMarketDataAdapter,
+    ExchangeHistoricalCandleRequest,
+    ExchangeName,
+    MarketType,
+)
 from backend.models import Candle, Timeframe
-from backend.pipelines.timeframe.aggregation import timeframe_duration_ms
 
 
 DEFAULT_HISTORICAL_DATA_ROOT = Path("data") / "historical"
-BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,7 +27,8 @@ class HistoricalCandleRequest:
     timeframe: Timeframe
     start_time_ms: int
     end_time_ms: int
-    exchange: str = "binance"
+    exchange: str = ExchangeName.BITMART.value
+    market_type: str = MarketType.USDT_M_PERPETUAL.value
 
     def __post_init__(self) -> None:
         if not self.symbol:
@@ -36,6 +39,8 @@ class HistoricalCandleRequest:
             raise ValueError("end_time_ms must be after start_time_ms")
         if not self.exchange:
             raise ValueError("exchange is required")
+        if not self.market_type:
+            raise ValueError("market_type is required")
 
 
 class HistoricalCandleLoader(Protocol):
@@ -53,7 +58,7 @@ class HistoricalCandleFileStore:
 
     def path_for(self, request: HistoricalCandleRequest) -> Path:
         filename = f"{request.start_time_ms}_{request.end_time_ms}.jsonl"
-        return self._root / request.exchange / request.symbol / request.timeframe.value / filename
+        return self._root / request.exchange / request.market_type / request.symbol / request.timeframe.value / filename
 
     def save(self, request: HistoricalCandleRequest, candles: Iterable[Candle]) -> Path:
         path = self.path_for(request)
@@ -82,78 +87,51 @@ class HistoricalCandleFileStore:
         return tuple(sorted(candles, key=lambda candle: candle.open_time_ms))
 
 
-class BinanceHistoricalCandleDownloader:
-    """Download Binance Spot klines as canonical Candle objects for M27."""
+class BitMartHistoricalCandleDownloader:
+    """Download BitMart USDT-M futures candles as canonical Candle objects for M27/M31.1."""
 
-    def __init__(self, *, base_url: str = BINANCE_KLINES_URL, limit: int = 1000) -> None:
-        self._base_url = base_url
+    def __init__(
+        self,
+        *,
+        adapter: BitMartFuturesMarketDataAdapter | None = None,
+        limit: int = 500,
+    ) -> None:
+        self._adapter = adapter or BitMartFuturesMarketDataAdapter(page_size=limit)
         self._limit = limit
 
     def load(self, request: HistoricalCandleRequest) -> tuple[Candle, ...]:
-        candles: list[Candle] = []
-        cursor_ms = request.start_time_ms
-        duration_ms = timeframe_duration_ms(request.timeframe)
-        while cursor_ms < request.end_time_ms:
-            rows = self._fetch_page(request, cursor_ms)
-            if not rows:
-                break
-            for row in rows:
-                candle = candle_from_binance_kline(
-                    row,
-                    symbol=request.symbol,
-                    timeframe=request.timeframe,
-                    duration_ms=duration_ms,
-                )
-                if candle.open_time_ms >= request.end_time_ms:
-                    break
-                candles.append(candle)
-            last_open_time_ms = candles[-1].open_time_ms if candles else cursor_ms
-            next_cursor_ms = last_open_time_ms + duration_ms
-            if next_cursor_ms <= cursor_ms:
-                break
-            cursor_ms = next_cursor_ms
-            if len(rows) < self._limit:
-                break
-        return tuple(candles)
-
-    def _fetch_page(self, request: HistoricalCandleRequest, start_time_ms: int) -> list[object]:
-        query = urlencode(
-            {
-                "symbol": request.symbol.upper(),
-                "interval": request.timeframe.value,
-                "startTime": start_time_ms,
-                "endTime": request.end_time_ms,
-                "limit": self._limit,
-            },
+        result = self._adapter.fetch_historical_candles(
+            ExchangeHistoricalCandleRequest(
+                exchange=ExchangeName(request.exchange),
+                market_type=MarketType(request.market_type),
+                symbol=request.symbol,
+                timeframe=request.timeframe,
+                start_time_ms=request.start_time_ms,
+                end_time_ms=request.end_time_ms,
+                limit=self._limit,
+            ),
         )
-        http_request = Request(f"{self._base_url}?{query}", headers={"Accept": "application/json"})
-        with urlopen(http_request, timeout=15) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-        if not isinstance(payload, list):
-            raise ValueError("Binance kline response must be a list")
-        return payload
+        return result.candles
 
 
-def candle_from_binance_kline(
-    row: object,
+def candle_from_bitmart_kline(
+    row: dict[str, object],
     *,
     symbol: str,
     timeframe: Timeframe,
     duration_ms: int,
 ) -> Candle:
-    if not isinstance(row, list) or len(row) < 6:
-        raise ValueError("Binance kline row must contain at least six fields")
-    open_time_ms = read_int(row[0], "open_time")
+    open_time_s = read_int(first_present(row, "timestamp", "time", "ts"), "timestamp")
     return Candle(
         symbol=symbol,
         timeframe=timeframe,
-        open_time_ms=open_time_ms,
-        close_time_ms=open_time_ms + duration_ms,
-        open=read_float(row[1], "open"),
-        high=read_float(row[2], "high"),
-        low=read_float(row[3], "low"),
-        close=read_float(row[4], "close"),
-        volume=read_float(row[5], "volume"),
+        open_time_ms=open_time_s * 1000,
+        close_time_ms=open_time_s * 1000 + duration_ms,
+        open=read_float(first_present(row, "open", "o"), "open"),
+        high=read_float(first_present(row, "high", "h"), "high"),
+        low=read_float(first_present(row, "low", "l"), "low"),
+        close=read_float(first_present(row, "close", "c"), "close"),
+        volume=read_float(first_present(row, "volume", "vol", "v"), "volume"),
     )
 
 
@@ -201,3 +179,10 @@ def read_float(value: object, field_name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float | str):
         raise ValueError(f"{field_name} must be numeric")
     return float(value)
+
+
+def first_present(payload: dict[str, object], *keys: str) -> object:
+    for key in keys:
+        if key in payload:
+            return payload[key]
+    return None

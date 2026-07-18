@@ -25,7 +25,7 @@ class Trade:
     price: float
     quantity: float
     timestamp_ms: int
-    source: str = "binance"
+    source: str = "bitmart_usdt_m_perpetual"
 
     def __post_init__(self) -> None:
         """Validate normalized trade data for FR-103 and TEST-001."""

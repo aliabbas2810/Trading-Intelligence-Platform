@@ -6,7 +6,7 @@ Accepted
 
 ## Context
 
-The project requires custom overlays and Binance/TradingView charts cannot be externally controlled.
+The project requires custom overlays and exchange/TradingView charts cannot be externally controlled.
 
 ## Decision
 

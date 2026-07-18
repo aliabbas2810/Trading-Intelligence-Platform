@@ -14,6 +14,8 @@ def test_load_default_settings_validates_typed_config() -> None:
     settings = load_settings()
 
     assert settings.app.name == "trading-intelligence-platform"
+    assert settings.market_data.exchange == "bitmart"
+    assert settings.market_data.market_type == "usdt_m_perpetual"
     assert settings.market_data.symbols == ("BTCUSDT",)
     assert not settings.market_data.live_enabled
     assert settings.market_data.reconnect_delay_seconds == 1.0
@@ -43,7 +45,8 @@ app:
   name: trading-intelligence-platform
   environment: local
 market_data:
-  exchange: binance
+  exchange: unsupported
+  market_type: spot
   symbols: []
   source: trade_stream
 candles:

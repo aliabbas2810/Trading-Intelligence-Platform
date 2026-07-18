@@ -8,7 +8,7 @@ from backend.engines.historical import (
     HistoricalCandleFileStore,
     HistoricalCandleRequest,
 )
-from backend.engines.historical.loader import candle_from_binance_kline
+from backend.engines.historical.loader import candle_from_bitmart_kline
 from backend.engines.historical.validation import HistoricalValidationRunner
 from backend.models import Candle, Timeframe
 from scripts.validate_historical import main
@@ -24,15 +24,22 @@ def test_historical_file_store_round_trips_candles(tmp_path: Path) -> None:
     path = store.save(request, candles)
     loaded = store.load(request)
 
-    assert path == tmp_path / "binance" / "BTCUSDT" / "1m" / "0_240000.jsonl"
+    assert path == tmp_path / "bitmart" / "usdt_m_perpetual" / "BTCUSDT" / "1m" / "0_240000.jsonl"
     assert loaded == candles
 
 
-def test_binance_kline_row_normalizes_to_canonical_candle() -> None:
-    """Covers M27 Binance candle normalization without network access."""
+def test_bitmart_kline_row_normalizes_to_canonical_candle() -> None:
+    """Covers M27/M31.1 BitMart candle normalization without network access."""
 
-    candle = candle_from_binance_kline(
-        [0, "100.0", "105.0", "99.0", "104.0", "12.5"],
+    candle = candle_from_bitmart_kline(
+        {
+            "timestamp": 0,
+            "open": "100.0",
+            "high": "105.0",
+            "low": "99.0",
+            "close": "104.0",
+            "volume": "12.5",
+        },
         symbol="BTCUSDT",
         timeframe=Timeframe.ONE_MINUTE,
         duration_ms=60_000,

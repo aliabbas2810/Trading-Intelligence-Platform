@@ -24,7 +24,7 @@ py -3.12 scripts/smoke_api.py --base-url http://127.0.0.1:8000 --symbol BTCUSDT 
 ### Backend Startup
 
 - [ ] Run `py -3.12 -m backend.app --api --dry-run --host 127.0.0.1 --port 8000`.
-- [ ] Confirm the process stays running without requiring Binance network access.
+- [ ] Confirm the process stays running without requiring BitMart network access.
 - [ ] Confirm startup logs show the runtime started.
 - [ ] Confirm no traceback appears during startup.
 
@@ -109,12 +109,12 @@ Invoke-RestMethod `
 ### Backend Logs
 
 - [ ] Confirm health, replay, scanner, and AI calls do not produce tracebacks.
-- [ ] Confirm dry-run mode does not start Binance live streaming.
+- [ ] Confirm dry-run mode does not start BitMart live streaming.
 - [ ] Confirm shutdown with `Ctrl+C` exits cleanly.
 
 ## Known Stabilization Boundaries
 
 - No real LLM provider is expected.
 - No order execution is expected.
-- No all-symbol live Binance streaming is expected.
+- No all-symbol live BitMart streaming is expected.
 - Frontend should render backend outputs only and must not calculate candles, structure, trend, scanner scores, or AI decisions.

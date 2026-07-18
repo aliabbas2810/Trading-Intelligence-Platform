@@ -32,7 +32,7 @@ weights, historical retention policy, and overlap score weight.
 
 ### M2 - Market Data Pipeline
 
-Implemented Binance Spot trade message parser/normalizer, trade validation, market data pipeline interface, stream-client skeleton, and event publication tests.
+Implemented the original exchange-specific trade ingestion foundation. M31.1 supersedes active market-data paths with BitMart USDT-M futures only.
 
 Verification: covered by backend pytest, ruff, and mypy.
 
@@ -88,7 +88,7 @@ Verification: covered by backend pytest, ruff, and mypy.
 
 - No real LLM provider is integrated.
 - No order execution is implemented.
-- No all-symbol live Binance streaming is implemented.
+- No all-symbol live exchange streaming is implemented.
 - Frontend remains a visualization foundation and does not calculate structure or trend logic.
 
 ## Phase 2 - v0.2.0 Runtime Assembly
@@ -108,7 +108,7 @@ Planned scope:
 Constraints:
 
 - Do not add new trading logic.
-- Do not expand Binance live networking beyond existing foundations.
+- Do not expand live exchange networking beyond existing foundations.
 - Do not add real LLM integration.
 - Do not add order execution.
 
@@ -162,6 +162,20 @@ Implemented scope:
 - `RISK-006`: explicit exclusion of position sizing, order execution, AI risk decisions, and recalculation of upstream logic.
 
 Verification: covered by backend pytest, ruff, and mypy.
+
+### M31.1 - BitMart-Only Exchange Consolidation
+
+Consolidated active market-data paths onto BitMart USDT-M futures.
+
+Implemented scope:
+
+- Runtime, health, CLI, historical download, sync, and default configuration report/use BitMart only.
+- Historical cache paths include exchange and market type to prevent cross-exchange data mixing.
+- BitMart live mode reports foundation-only/unavailable until WebSocket ingestion is implemented.
+- Removed active runtime dependencies on the previous exchange-specific live/historical code.
+- Preserved exchange-neutral domain, storage, structure, trend, AOI, entry, risk, checklist, scoring, scanner, and AI boundaries.
+
+Verification: backend pytest, ruff, and mypy required before commit.
 
 ### M23 - Checklist Engine
 

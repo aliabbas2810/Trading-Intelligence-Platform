@@ -15,7 +15,7 @@ def test_trade_accepts_valid_normalized_data() -> None:
         price=100_000.0,
         quantity=0.25,
         timestamp_ms=1_725_000_000_123,
-        source="binance_spot",
+        source="bitmart_usdt_m_perpetual",
     )
 
     assert trade.symbol == "BTCUSDT"
@@ -30,35 +30,35 @@ def test_trade_accepts_valid_normalized_data() -> None:
             price=100_000.0,
             quantity=0.25,
             timestamp_ms=1_725_000_000_123,
-            source="binance_spot",
+            source="bitmart_usdt_m_perpetual",
         ),
         lambda: Trade(
             symbol="BTCUSDT",
             price=0.0,
             quantity=0.25,
             timestamp_ms=1_725_000_000_123,
-            source="binance_spot",
+            source="bitmart_usdt_m_perpetual",
         ),
         lambda: Trade(
             symbol="BTCUSDT",
             price=float("nan"),
             quantity=0.25,
             timestamp_ms=1_725_000_000_123,
-            source="binance_spot",
+            source="bitmart_usdt_m_perpetual",
         ),
         lambda: Trade(
             symbol="BTCUSDT",
             price=100_000.0,
             quantity=-1.0,
             timestamp_ms=1_725_000_000_123,
-            source="binance_spot",
+            source="bitmart_usdt_m_perpetual",
         ),
         lambda: Trade(
             symbol="BTCUSDT",
             price=100_000.0,
             quantity=0.25,
             timestamp_ms=-1,
-            source="binance_spot",
+            source="bitmart_usdt_m_perpetual",
         ),
         lambda: Trade(
             symbol="BTCUSDT",

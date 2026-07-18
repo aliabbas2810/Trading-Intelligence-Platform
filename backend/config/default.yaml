@@ -3,10 +3,11 @@ app:
   environment: local
 
 market_data:
-  exchange: binance
+  exchange: bitmart
+  market_type: usdt_m_perpetual
   symbols:
     - BTCUSDT
-  source: trade_stream
+  source: bitmart_usdt_m_perpetual
   live_enabled: false
   reconnect_delay_seconds: 1.0
   max_reconnect_attempts:

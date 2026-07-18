@@ -11,6 +11,12 @@
 - SQLite synchronization metadata/checkpoints and bounded synchronization coordinator.
 - Market-data sync runtime/API status boundaries and scanner-ready universe provider.
 
+### Changed
+
+- M31.1: Consolidated active market-data paths to BitMart USDT-M futures only.
+- Historical cache paths now include exchange and market type to avoid cross-exchange mixing.
+- Live exchange mode reports BitMart WebSocket ingestion as foundation-only/unavailable until implemented.
+
 ### Notes
 
 - Market-data synchronization is disabled by default.
@@ -23,7 +29,7 @@ Completed Milestones M1-M10.
 ### Added
 
 - M1: Repository foundation with typed settings, structured logging, event bus, and tests.
-- M2: Binance Spot trade ingestion foundation with trade parsing, validation, and stream-client skeleton.
+- M2: Original exchange ingestion foundation with trade parsing, validation, and stream-client skeleton.
 - M3: Deterministic 1-minute candle pipeline with synthetic candles and persistence.
 - M4: Higher-timeframe aggregation for 4H, Daily, and Weekly candles.
 - M5: Body-based market structure engine with displacement-confirmed swings and BOS detection.

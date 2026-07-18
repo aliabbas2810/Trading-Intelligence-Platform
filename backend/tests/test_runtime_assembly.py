@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -18,7 +17,7 @@ from backend.app.cli import main
 from backend.config import PlatformSettings, load_settings
 from backend.engines.historical import HistoricalCandleFileStore, HistoricalCandleRequest
 from backend.models import Candle, Timeframe, Trade
-from backend.pipelines.market_data import BinanceTradeStreamClient, TradeReceivedEvent
+from backend.pipelines.market_data import BitMartTradeStreamClient, MarketDataConnectionStatus, TradeReceivedEvent
 
 
 def make_trade(timestamp_ms: int, price: float) -> Trade:
@@ -28,18 +27,6 @@ def make_trade(timestamp_ms: int, price: float) -> Trade:
         quantity=1.0,
         timestamp_ms=timestamp_ms,
         source="runtime-test",
-    )
-
-
-def trade_payload(*, timestamp_ms: int, price: float) -> str:
-    return json.dumps(
-        {
-            "e": "trade",
-            "s": "BTCUSDT",
-            "p": str(price),
-            "q": "1.0",
-            "T": timestamp_ms,
-        },
     )
 
 
@@ -85,7 +72,7 @@ def test_runtime_rejects_duplicate_start() -> None:
         runtime.start()
 
 
-def test_dry_run_mode_does_not_require_binance_network_access() -> None:
+def test_dry_run_mode_does_not_require_bitmart_network_access() -> None:
     """Covers RUNTIME-005 and TEST-001."""
 
     runtime = BackendRuntime(mode=RuntimeMode.DRY_RUN)
@@ -93,8 +80,7 @@ def test_dry_run_mode_does_not_require_binance_network_access() -> None:
     runtime.start()
     component_statuses = {component.name: component.status for component in runtime.health().components}
 
-    assert component_statuses["binance_stream_client"] is ComponentStatus.DISABLED
-    assert runtime.market_data_parser is not None
+    assert component_statuses["bitmart_stream_client"] is ComponentStatus.DISABLED
     assert runtime.market_data_pipeline is not None
 
 
@@ -155,7 +141,7 @@ def test_historical_live_runtime_loads_fixture_and_starts_stream(tmp_path: Path)
     assert runner.started
     assert components["market_data_mode"].message == "historical_live"
     assert components["stream_enabled"].message == "True"
-    assert components["binance_stream_client"].status is ComponentStatus.RUNNING
+    assert components["bitmart_stream_client"].status is ComponentStatus.RUNNING
     assert components["historical_data"].message == "loaded 4 1m candles for BTCUSDT"
     assert components["historical_candles_loaded"].message == "4"
     assert components["demo_data"].status is ComponentStatus.DISABLED
@@ -169,9 +155,9 @@ def test_historical_live_boundary_drops_old_live_trades(tmp_path: Path) -> None:
     HistoricalCandleFileStore(tmp_path).save(request, historical_fixture_candles(count=2))
     runner = RecordingLiveStreamRunner(
         messages=(
-            trade_payload(timestamp_ms=119_000, price=200.0),
-            trade_payload(timestamp_ms=120_000, price=300.0),
-            trade_payload(timestamp_ms=180_000, price=301.0),
+            make_trade(119_000, 200.0),
+            make_trade(120_000, 300.0),
+            make_trade(180_000, 301.0),
         ),
     )
     runtime = BackendRuntime(
@@ -209,29 +195,33 @@ def test_historical_live_does_not_add_duplicate_event_subscriptions(tmp_path: Pa
     assert len(runtime.event_bus._handlers[TradeReceivedEvent]) == 1  # noqa: SLF001
 
 
-def test_live_binance_mode_starts_stream_client() -> None:
-    """Covers FR-101, RUNTIME-002, RUNTIME-003, and TEST-001."""
+def test_live_bitmart_mode_reports_unavailable_by_default() -> None:
+    """M31.1 exposes BitMart live mode honestly until WebSocket ingestion exists."""
 
-    runner = RecordingLiveStreamRunner()
     runtime = BackendRuntime(
         settings=live_enabled_settings(),
-        mode=RuntimeMode.LIVE_BINANCE,
-        live_stream_runner_factory=lambda client: runner.bind(client),
+        mode=RuntimeMode.LIVE_BITMART,
     )
 
     runtime.start()
+    components = {component.name: component for component in runtime.health().components}
 
-    assert runner.started
-    assert runner.client is runtime.binance_stream_client
+    assert runtime.health().mode is RuntimeMode.LIVE_BITMART
+    assert components["market_data_mode"].message == "live_bitmart"
+    assert components["exchange"].message == "bitmart"
+    assert components["market_type"].message == "usdt_m_perpetual"
+    assert components["stream_enabled"].message == "True"
+    assert components["stream_status"].message == MarketDataConnectionStatus.ERROR.value
+    assert components["bitmart_stream_client"].message == "bitmart_live_stream_unavailable"
 
 
-def test_live_binance_mode_stops_stream_client() -> None:
+def test_live_bitmart_mode_stops_injected_stream_client() -> None:
     """Covers FR-102 lifecycle stop handling and RUNTIME-003."""
 
     runner = RecordingLiveStreamRunner()
     runtime = BackendRuntime(
         settings=live_enabled_settings(),
-        mode=RuntimeMode.LIVE_BINANCE,
+        mode=RuntimeMode.LIVE_BITMART,
         live_stream_runner_factory=lambda client: runner.bind(client),
     )
     runtime.start()
@@ -241,38 +231,19 @@ def test_live_binance_mode_stops_stream_client() -> None:
     assert runner.stopped
 
 
-def test_live_binance_trade_event_reaches_candle_pipeline() -> None:
-    """Covers FR-109 and RUNTIME-002 without real Binance network calls."""
+def test_live_bitmart_injected_trade_event_reaches_candle_pipeline() -> None:
+    """Covers FR-109 and RUNTIME-002 without real BitMart network calls."""
 
-    trade_payload = json.dumps(
-        {
-            "e": "trade",
-            "s": "BTCUSDT",
-            "p": "100.0",
-            "q": "1.0",
-            "T": 1_000,
-        },
-    )
-    runner = RecordingLiveStreamRunner(messages=(trade_payload,))
+    runner = RecordingLiveStreamRunner(messages=(make_trade(1_000, 100.0),))
     runtime = BackendRuntime(
         settings=live_enabled_settings(),
-        mode=RuntimeMode.LIVE_BINANCE,
+        mode=RuntimeMode.LIVE_BITMART,
         live_stream_runner_factory=lambda client: runner.bind(client),
     )
 
     runtime.start()
     assert runner.client is not None
-    runner.client.handle_message(
-        json.dumps(
-            {
-                "e": "trade",
-                "s": "BTCUSDT",
-                "p": "101.0",
-                "q": "1.0",
-                "T": 61_000,
-            },
-        ),
-    )
+    runner.client.publish_trade(make_trade(61_000, 101.0))
 
     candles = runtime.visualization_api.get_candles("BTCUSDT", Timeframe.ONE_MINUTE)
     assert len(candles) == 1
@@ -280,25 +251,27 @@ def test_live_binance_trade_event_reaches_candle_pipeline() -> None:
     assert candles[0].close == 100.0
 
 
-def test_live_binance_health_reports_stream_fields() -> None:
+def test_live_bitmart_health_reports_stream_fields() -> None:
     """Covers RUNTIME-004 live market data health fields."""
 
     runner = RecordingLiveStreamRunner()
     runtime = BackendRuntime(
         settings=live_enabled_settings(symbol="ETHUSDT"),
-        mode=RuntimeMode.LIVE_BINANCE,
+        mode=RuntimeMode.LIVE_BITMART,
         live_stream_runner_factory=lambda client: runner.bind(client),
     )
 
     runtime.start()
     components = {component.name: component for component in runtime.health().components}
 
-    assert runtime.health().mode is RuntimeMode.LIVE_BINANCE
-    assert components["market_data_mode"].message == "live_binance"
+    assert runtime.health().mode is RuntimeMode.LIVE_BITMART
+    assert components["market_data_mode"].message == "live_bitmart"
     assert components["stream_enabled"].message == "True"
     assert components["stream_status"].message == "stopped"
     assert components["active_symbol"].message == "ETHUSDT"
-    assert components["binance_stream_client"].status is ComponentStatus.RUNNING
+    assert components["exchange"].message == "bitmart"
+    assert components["market_type"].message == "usdt_m_perpetual"
+    assert components["bitmart_stream_client"].status is ComponentStatus.RUNNING
 
 
 def test_runtime_wires_trade_events_into_existing_candle_pipeline() -> None:
@@ -325,6 +298,13 @@ def test_cli_entrypoint_starts_and_stops_once(capsys: pytest.CaptureFixture[str]
     assert exit_code == 0
     assert '"mode": "dry_run"' in captured.out
     assert '"state": "running"' in captured.out
+
+
+def test_cli_rejects_removed_live_binance_option() -> None:
+    """M31.1 removes Binance runtime mode instead of silently falling back."""
+
+    with pytest.raises(SystemExit):
+        main(["--live-binance", "--once"])
 
 
 def test_cli_entrypoint_starts_historical_once(
@@ -373,7 +353,7 @@ def test_cli_entrypoint_starts_historical_live_once(
     HistoricalCandleFileStore(tmp_path).save(request, historical_fixture_candles(count=4))
     monkeypatch.setattr(
         runtime_module,
-        "BinanceLiveStreamRunner",
+        "BitMartUnavailableLiveStreamRunner",
         lambda client: RecordingLiveStreamRunner().bind(client),
     )
 
@@ -406,6 +386,8 @@ def test_runtime_does_not_duplicate_business_logic() -> None:
     runtime_source = Path("backend/app/runtime.py").read_text(encoding="utf-8")
 
     forbidden_fragments = (
+        "Binance",
+        "binance",
         "body_high =",
         "body_low =",
         "higher_body_high",
@@ -420,22 +402,22 @@ def test_runtime_does_not_duplicate_business_logic() -> None:
 
 
 class RecordingLiveStreamRunner:
-    def __init__(self, messages: tuple[str, ...] = ()) -> None:
+    def __init__(self, messages: tuple[Trade, ...] = ()) -> None:
         self.messages = messages
-        self.client: BinanceTradeStreamClient | None = None
+        self.client: BitMartTradeStreamClient | None = None
         self.started = False
         self.stopped = False
 
-    def bind(self, client: BinanceTradeStreamClient) -> RecordingLiveStreamRunner:
+    def bind(self, client: BitMartTradeStreamClient) -> RecordingLiveStreamRunner:
         self.client = client
         return self
 
     def start(self) -> None:
         self.started = True
         if self.client is None:
-            raise RuntimeError("Missing Binance client")
-        for message in self.messages:
-            self.client.handle_message(message)
+            raise RuntimeError("Missing BitMart client")
+        for trade in self.messages:
+            self.client.publish_trade(trade)
 
     def stop(self) -> None:
         self.stopped = True
@@ -449,8 +431,6 @@ def live_enabled_settings(symbol: str = "BTCUSDT") -> PlatformSettings:
                 update={
                     "symbols": (symbol,),
                     "live_enabled": True,
-                    "reconnect_delay_seconds": 0.1,
-                    "max_reconnect_attempts": 3,
                 },
             ),
         },

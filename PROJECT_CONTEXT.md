@@ -12,14 +12,14 @@ Phase 3 Trading Intelligence implementation and validation.
 
 TIP is a local-first, professional market-analysis platform for deterministic crypto market analysis and future AI-assisted trading intelligence.
 
-The platform starts with Binance Spot trade data and BTCUSDT, but the backend now includes foundations for multi-symbol scanning, replay-compatible processing, visualization read models, and structured AI decision support.
+The platform uses BitMart USDT-M futures market data and BTCUSDT as the first canonical symbol, with foundations for multi-symbol scanning, replay-compatible processing, visualization read models, and structured AI decision support.
 
 ## Completed Milestones
 
 | Milestone | Status | Summary |
 |---|---|---|
 | M1 | Completed | Repository foundation, typed settings, structured logging, synchronous event bus, tests. |
-| M2 | Completed | Binance Spot trade ingestion foundation, trade normalization, validation, stream client skeleton. |
+| M2 | Superseded by M31.1 | Original exchange-specific ingestion foundation; active market-data paths now use BitMart USDT-M futures only. |
 | M3 | Completed | Deterministic 1-minute candle construction, synthetic candles, in-memory and JSONL persistence. |
 | M4 | Completed | 4H, Daily, and Weekly aggregation from completed 1-minute candles. |
 | M5 | Completed | Body-based market structure engine with displacement-based swings and BOS detection. |
@@ -28,7 +28,7 @@ The platform starts with Binance Spot trade data and BTCUSDT, but the backend no
 | M8 | Completed | Replay engine that publishes historical events through the same event bus path as live mode. |
 | M9 | Completed | Backend scanner foundation that ranks existing multi-symbol analytical outputs. |
 | M10 | Completed | Backend AI decision engine foundation with structured input and deterministic mock provider. |
-| M11-M20 | Completed | Runtime/API/frontend stabilization through local runnable backend, live Binance mode wiring, API service, visualization data connection, demo data, replay controls, scanner API/UI, AI decision API, and non-destructive chart replay cursor. |
+| M11-M20 | Completed | Runtime/API/frontend stabilization through local runnable backend, exchange mode wiring, API service, visualization data connection, demo data, replay controls, scanner API/UI, AI decision API, and non-destructive chart replay cursor. |
 | M21-M26 | Completed | Entry, risk, checklist, setup scoring, consolidated trading intelligence API, and Trading Intelligence Panel. |
 | M27-M31 | Completed | Historical validation/runtime modes, Weekly/Daily AOI foundation, AOI visualization/gating, and exchange synchronization foundation. |
 
@@ -39,7 +39,7 @@ TIP is organized around pipelines and engines:
 - `backend/core/`: synchronous event bus and structured logging.
 - `backend/config/`: Pydantic settings and version-controlled defaults.
 - `backend/models/`: canonical domain objects such as `Trade`, `Candle`, and `Timeframe`.
-- `backend/pipelines/market_data/`: Binance trade parsing, validation, status events, and stream-client skeleton.
+- `backend/pipelines/market_data/`: BitMart USDT-M market-data event boundary and live-unavailable status foundation.
 - `backend/exchange/`: exchange-agnostic public market-data adapter contracts and BitMart USDT-M adapter foundation.
 - `backend/pipelines/candle/`: deterministic 1-minute candle building from canonical trade events.
 - `backend/pipelines/timeframe/`: deterministic 4H, Daily, and Weekly aggregation from closed 1-minute candles.
@@ -60,9 +60,9 @@ TIP is organized around pipelines and engines:
 
 ## Core Decisions Already Made
 
-1. Binance Spot trade stream is the first live data source.
+1. BitMart USDT-M futures is the sole supported exchange/market for active market-data paths.
 2. BTCUSDT is the first symbol.
-3. The system builds candles from trade stream data, not Binance chart overlays.
+3. The system builds candles from canonical exchange data, not external chart overlays.
 4. One-minute candles are the authoritative base timeframe.
 5. Supported chart timeframes are 1W, 1D, 4H, 2H, 1H, 30M, 15M, 5M, and 1M; higher timeframes are derived from one-minute candles.
 6. Candle closure is time-driven and UTC aligned.
@@ -81,7 +81,7 @@ TIP is organized around pipelines and engines:
 
 The backend can normalize trades, build and persist candles, aggregate higher timeframes, detect body-based structure, classify trends, aggregate multi-timeframe trend state, expose local API endpoints, replay historical events through deterministic replay components, drive non-destructive chart replay with a cursor, scan existing outputs for ranked setup candidates, classify entry state, produce deterministic risk plans, produce evidence-driven checklists, produce weighted setup scores, return consolidated trading-intelligence chains, and produce structured mock AI decision outputs.
 
-M31 adds an opt-in exchange synchronization foundation. The backend now has a generic exchange market-data adapter interface, a BitMart USDT-M public adapter for active contract discovery and completed 1m candle retrieval, a canonical 1m history store boundary, SQLite sync metadata/checkpoints, incremental sync planning, bounded per-symbol coordination, sync status APIs, and a scanner-ready symbol universe boundary. The feature is disabled by default and does not change trading-analysis algorithms.
+M31 adds an opt-in exchange synchronization foundation. The backend now has a generic exchange market-data adapter interface, a BitMart USDT-M public adapter for active contract discovery and completed 1m candle retrieval, a canonical 1m history store boundary, SQLite sync metadata/checkpoints, incremental sync planning, bounded per-symbol coordination, sync status APIs, and a scanner-ready symbol universe boundary. M31.1 consolidates active market-data paths onto BitMart only; historical and sync data must never mix across exchanges.
 
 The backend also has a Weekly/Daily AOI foundation and strategy gate. Precomputed bullish
 HL-to-HH or bearish LH-to-LL legs define the search range; at least three candle-body

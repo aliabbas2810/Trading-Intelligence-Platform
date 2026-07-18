@@ -6,7 +6,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from backend.engines.historical import (
-    BinanceHistoricalCandleDownloader,
+    BitMartHistoricalCandleDownloader,
     HistoricalCandleFileStore,
     HistoricalCandleRequest,
 )
@@ -16,13 +16,13 @@ from backend.models import Timeframe
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Validate historical Binance candles through TIP engines.")
+    parser = argparse.ArgumentParser(description="Validate historical BitMart USDT-M candles through TIP engines.")
     parser.add_argument("--symbol", default="BTCUSDT")
     parser.add_argument("--timeframe", default="1m", choices=[timeframe.value for timeframe in Timeframe])
     parser.add_argument("--start", required=True, help="UTC ISO timestamp, e.g. 2025-01-01T00:00:00Z")
     parser.add_argument("--end", required=True, help="UTC ISO timestamp, e.g. 2025-01-01T02:00:00Z")
     parser.add_argument("--data-root", default=str(Path("data") / "historical"))
-    parser.add_argument("--download", action="store_true", help="Download from Binance before validation.")
+    parser.add_argument("--download", action="store_true", help="Download from BitMart before validation.")
     args = parser.parse_args(argv)
 
     request = HistoricalCandleRequest(
@@ -33,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     store = HistoricalCandleFileStore(Path(args.data_root))
     if args.download:
-        candles = BinanceHistoricalCandleDownloader().load(request)
+        candles = BitMartHistoricalCandleDownloader().load(request)
         path = store.save(request, candles)
     else:
         path = store.path_for(request)

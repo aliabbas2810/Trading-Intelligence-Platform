@@ -21,7 +21,7 @@ This SRS defines what the system shall do. It is intended to support implementat
 
 Version 1 shall support:
 
-- live Binance crypto data ingestion,
+- BitMart USDT-M futures market-data ingestion,
 - deterministic candle generation,
 - derived 4H / Daily / Weekly timeframes,
 - body-based market structure detection,
@@ -110,19 +110,21 @@ Priorities:
 
 ### 4.1 Market Data Pipeline
 
-#### FR-101 — Connect to Binance Trade Stream
+#### FR-101 — BitMart Live Stream Foundation
 
 Priority: Mandatory
 
-The platform shall establish a live connection to the Binance Spot trade stream for supported symbols.
+The platform shall use BitMart USDT-M futures as the sole supported exchange/market data source.
+Until BitMart WebSocket ingestion is implemented, live mode shall report that streaming is
+foundation-only/unavailable rather than silently using another exchange.
 
 Rationale: Live trade data is the foundation for candle construction.
 
 Acceptance Criteria:
 
-- The system connects to Binance trade stream.
-- Trade messages are received for BTCUSDT.
-- Connection status is logged.
+- Runtime and health status report BitMart and USDT-M perpetual market type.
+- No Binance runtime, historical, or live fallback is used.
+- BitMart live unavailability is reported clearly until implemented.
 
 Milestone: M2
 
@@ -857,7 +859,7 @@ Milestone: M11
 
 Priority: High
 
-The local backend application shall support a dry-run or replay-friendly local mode that does not require live Binance streaming.
+The local backend application shall support a dry-run or replay-friendly local mode that does not require live BitMart streaming.
 
 Milestone: M11
 
@@ -1015,10 +1017,11 @@ code shall not depend on BitMart-specific DTOs.
 Adapters shall fetch historical completed 1m candles using deterministic pagination,
 deduplication, current-candle exclusion, retry hooks, and injectable transports for tests.
 
-### EXCHANGE-006 - Binance Compatibility
+### EXCHANGE-006 - BitMart-Only Active Exchange
 
-Existing Binance market-data foundations shall remain supported and must not be broken by
-the exchange abstraction.
+BitMart USDT-M futures shall be the only configured and active exchange/market. Historical,
+sync, runtime, health, and CLI paths shall not silently fall back to Binance or mix Binance
+cache data with BitMart data.
 
 ### STORAGE-001 - Canonical 1m History Store
 

@@ -19,13 +19,13 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(description="Start the TIP backend runtime")
     mode_group = parser.add_mutually_exclusive_group()
-    mode_group.add_argument("--dry-run", action="store_true", help="start without live Binance streaming")
-    mode_group.add_argument("--live-binance", action="store_true", help="start Binance live stream when config enables it")
+    mode_group.add_argument("--dry-run", action="store_true", help="start without live BitMart streaming")
+    mode_group.add_argument("--live-bitmart", action="store_true", help="start BitMart live stream mode when config enables it")
     mode_group.add_argument("--historical", action="store_true", help="load local historical candle data")
     mode_group.add_argument(
         "--historical-live",
         action="store_true",
-        help="load historical 1m candles, then continue with Binance live streaming",
+        help="load historical 1m candles, then continue with BitMart live mode",
     )
     parser.add_argument("--api", action="store_true", help="run the local FastAPI service")
     parser.add_argument("--host", default="127.0.0.1", help="API host when --api is used")
@@ -40,7 +40,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--start", help="historical UTC ISO start, e.g. 2025-01-01T00:00:00Z")
     parser.add_argument("--end", help="historical UTC ISO end, e.g. 2025-01-01T02:00:00Z")
-    parser.add_argument("--download", action="store_true", help="download Binance historical candles before loading")
+    parser.add_argument("--download", action="store_true", help="download BitMart historical candles before loading")
     parser.add_argument("--data-root", default=str(Path("data") / "historical"), help="historical candle data root")
     args = parser.parse_args(argv)
 
@@ -86,8 +86,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def runtime_mode_from_args(args: argparse.Namespace) -> RuntimeMode:
-    if args.live_binance:
-        return RuntimeMode.LIVE_BINANCE
+    if args.live_bitmart:
+        return RuntimeMode.LIVE_BITMART
     if args.historical_live:
         return RuntimeMode.HISTORICAL_LIVE
     if args.historical:
@@ -97,7 +97,7 @@ def runtime_mode_from_args(args: argparse.Namespace) -> RuntimeMode:
 
 def settings_from_args(args: argparse.Namespace) -> PlatformSettings:
     settings = load_settings()
-    if not (args.live_binance or args.historical_live):
+    if not (args.live_bitmart or args.historical_live):
         return settings
     return settings.model_copy(
         update={
@@ -114,6 +114,8 @@ def settings_from_args(args: argparse.Namespace) -> PlatformSettings:
 def historical_config_from_args(args: argparse.Namespace) -> HistoricalRuntimeConfig:
     if args.start is None or args.end is None:
         raise SystemExit("--historical/--historical-live requires --start and --end")
+    if args.download and Timeframe(args.timeframe) is not Timeframe.ONE_MINUTE:
+        raise SystemExit("--download uses canonical BitMart 1m futures candles; use --timeframe 1m")
     if args.historical_live and Timeframe(args.timeframe) is not Timeframe.ONE_MINUTE:
         raise SystemExit("--historical-live requires --timeframe 1m")
     return HistoricalRuntimeConfig(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Mapping, cast
+from typing import Literal, Mapping, cast
 
 import yaml  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -22,7 +22,8 @@ class AppSettings(BaseModel):
 class MarketDataSettings(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    exchange: str
+    exchange: Literal["bitmart"]
+    market_type: Literal["usdt_m_perpetual"]
     symbols: tuple[str, ...] = Field(min_length=1)
     source: str
     live_enabled: bool = False
@@ -62,8 +63,8 @@ class MarketDataSyncSettings(BaseModel):
 
     enabled: bool = False
     startup_enabled: bool = False
-    exchange: str = "bitmart"
-    market_type: str = "usdt_m_perpetual"
+    exchange: Literal["bitmart"] = "bitmart"
+    market_type: Literal["usdt_m_perpetual"] = "usdt_m_perpetual"
     quote_asset: str = "USDT"
     history_horizon_days: int = Field(default=180, ge=1)
     canonical_timeframe: Timeframe = Timeframe.ONE_MINUTE

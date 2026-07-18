@@ -1,10 +1,7 @@
-from backend.pipelines.market_data.binance import (
-    BINANCE_SOURCE,
-    BINANCE_SPOT_STREAM_BASE_URL,
-    BinanceTradeMessageError,
-    BinanceTradeMessageParser,
-    BinanceTradeStreamClient,
-    BinanceTradeStreamClientConfig,
+from backend.pipelines.market_data.bitmart import (
+    BITMART_SOURCE,
+    BitMartTradeStreamClient,
+    BitMartTradeStreamClientConfig,
     EventBusMarketDataPipeline,
 )
 from backend.pipelines.market_data.events import (
@@ -15,12 +12,9 @@ from backend.pipelines.market_data.events import (
 from backend.pipelines.market_data.interfaces import MarketDataPipeline, TradeMessageParser
 
 __all__ = [
-    "BINANCE_SOURCE",
-    "BINANCE_SPOT_STREAM_BASE_URL",
-    "BinanceTradeMessageError",
-    "BinanceTradeMessageParser",
-    "BinanceTradeStreamClient",
-    "BinanceTradeStreamClientConfig",
+    "BITMART_SOURCE",
+    "BitMartTradeStreamClient",
+    "BitMartTradeStreamClientConfig",
     "EventBusMarketDataPipeline",
     "MarketDataConnectionStatus",
     "MarketDataPipeline",

@@ -386,7 +386,7 @@ def test_wait_due_to_weak_alignment_is_distinct_from_insufficient_data() -> None
 
 
 def test_startup_and_shutdown_call_runtime_lifecycle_without_network() -> None:
-    """Covers RUNTIME-003 and TEST-001 without live Binance networking."""
+    """Covers RUNTIME-003 and TEST-001 without live exchange networking."""
 
     runtime = RecordingRuntime()
 

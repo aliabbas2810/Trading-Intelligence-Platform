@@ -6,7 +6,7 @@ Instructions for Codex and other AI coding agents working on this repository.
 
 Build the Trading Intelligence Platform as a professional, modular, deterministic market-analysis platform.
 
-The platform must ingest live Binance trade data, build deterministic candles, generate higher timeframes, detect body-based market structure, classify trends, visualize results, and later support AI-assisted trade analysis.
+The platform must ingest BitMart USDT-M futures market data, build deterministic candles, generate higher timeframes, detect body-based market structure, classify trends, visualize results, and later support AI-assisted trade analysis.
 
 ## Required Reading Before Changes
 

@@ -9,12 +9,10 @@ from backend.models import Candle, Timeframe
 
 
 class ExchangeName(str, Enum):
-    BINANCE = "binance"
     BITMART = "bitmart"
 
 
 class MarketType(str, Enum):
-    SPOT = "spot"
     USDT_M_PERPETUAL = "usdt_m_perpetual"
 
 

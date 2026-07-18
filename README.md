@@ -1,6 +1,6 @@
 # Trading Intelligence Platform
 
-Trading Intelligence Platform (TIP) is a deterministic multi-timeframe trading intelligence platform for crypto market analysis. It currently focuses on a local BTCUSDT demo workflow while preserving architecture for Binance Spot live trade ingestion.
+Trading Intelligence Platform (TIP) is a deterministic multi-timeframe trading intelligence platform for crypto market analysis. It currently focuses on BTCUSDT using BitMart USDT-M futures as the sole supported exchange/market-data source.
 
 The system uses an event-driven Python backend, a FastAPI API service, and a React + Lightweight Charts frontend. Trading logic remains in the backend; the frontend renders backend outputs and does not calculate market structure, trend, entry, risk, checklist, score, or AI reasoning.
 
@@ -69,7 +69,7 @@ The platform currently supports:
 ### Phase 1: Foundation / M1-M10
 
 - M1: Repository foundation, typed settings, structured logging, synchronous event bus, tests.
-- M2: Binance Spot trade ingestion foundation, trade normalization, validation, stream-client skeleton.
+- M2: Original exchange ingestion foundation, now superseded by BitMart-only M31.1 market-data paths.
 - M3: Deterministic 1-minute candle pipeline, synthetic candles, in-memory and JSONL persistence.
 - M4: Higher-timeframe aggregation from completed 1-minute candles.
 - M5: Body-based market structure with displacement-confirmed swings and BOS detection.
@@ -82,7 +82,7 @@ The platform currently supports:
 ### Phase 2: Runtime, API, Visualization / M11-M20
 
 - M11: Local backend runtime assembly.
-- M12: Live Binance integration foundation inside runtime mode selection.
+- M12: Original live exchange mode foundation inside runtime mode selection.
 - M13: FastAPI service wiring.
 - M14: Frontend live API data connection.
 - M15: Dry-run demo mode and deterministic seed data.
@@ -105,7 +105,7 @@ The platform currently supports:
 ## Implemented Capabilities
 
 - Dry-run demo mode for BTCUSDT.
-- Live Binance Spot trade-stream integration foundation.
+- BitMart USDT-M market-data integration foundation.
 - Deterministic candle generation and higher-timeframe aggregation.
 - Market structure overlays: HH, HL, LH, LL, and BOS.
 - Trend state and multi-timeframe alignment.
@@ -154,13 +154,13 @@ Start the backend API with local historical candles:
 py -3.12 -m backend.app --api --historical --symbol BTCUSDT --timeframe 1m --start 2025-01-01T00:00:00Z --end 2025-01-01T02:00:00Z --host 127.0.0.1 --port 8000
 ```
 
-Add `--download` to fetch Binance candles into `data/historical` before loading them:
+Add `--download` to fetch BitMart USDT-M 1m candles into the exchange/market-specific local cache before loading them:
 
 ```powershell
 py -3.12 -m backend.app --api --historical --symbol BTCUSDT --timeframe 1m --start 2025-01-01T00:00:00Z --end 2025-01-01T02:00:00Z --download --host 127.0.0.1 --port 8000
 ```
 
-Start the backend API with historical 1m preload followed by live Binance continuation:
+Start the backend API with historical 1m preload followed by BitMart live mode. BitMart WebSocket ingestion is currently foundation-only and reports unavailable until implemented:
 
 ```powershell
 py -3.12 -m backend.app --api --historical-live --symbol BTCUSDT --start 2025-01-01T00:00:00Z --end 2025-01-01T02:00:00Z --download --host 127.0.0.1 --port 8000
@@ -241,6 +241,7 @@ npm test
 - Demo data is synthetic.
 - Historical and historical-live modes load local/downloaded candle data into the same read APIs as the frontend, but historical replay controls are not implemented yet.
 - M31 exchange synchronization is a foundation: it is opt-in, currently includes a BitMart USDT-M public adapter, and uses JSONL/SQLite local storage suitable for development rather than production-scale retention.
+- BitMart USDT-M futures is the only active exchange/market. Historical and sync caches include exchange and market type to avoid cross-exchange mixing.
 - Scanner all-symbol execution is gated to synchronized READY symbols only when the sync foundation is enabled; live all-symbol streaming is not implemented.
 - Current correctness proves integration consistency, not real-market strategy validity.
 - Real HH/HL/LH/LL, BOS, trend, AOI, entry, and risk correctness still needs historical and live-market validation.
