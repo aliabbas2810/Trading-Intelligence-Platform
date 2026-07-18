@@ -380,6 +380,20 @@ class EntrySignalEngine:
                     },
                 ),
             )
+        if "no_active_aoi" in codes:
+            evidence.append(
+                self._status_evidence(
+                    DecisionEvidenceCode.NO_ACTIVE_AOI,
+                    DecisionEvidenceCategory.AOI,
+                    DecisionEvidencePolarity.OPPOSES,
+                    DecisionEvidenceSeverity.BLOCKING,
+                    "no_active_aoi",
+                    metadata={
+                        "condition": "aoi_evaluated_without_active_weekly_or_daily_zone",
+                        "reason_codes": ",".join(gate.reason_codes),
+                    },
+                ),
+            )
         if "aoi_moved_away" in codes:
             evidence.append(
                 self._status_evidence(

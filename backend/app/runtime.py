@@ -39,6 +39,7 @@ from backend.engines.readiness import AnalysisReadiness, AnalysisReadinessEngine
 from backend.engines.historical import (
     BitMartHistoricalCandleDownloader,
     HistoricalCandleFileStore,
+    HistoricalCandleLoadResult,
     HistoricalCandleLoader,
     HistoricalCandleRequest,
 )
@@ -63,7 +64,7 @@ from backend.engines.trend import (
     TrendEngine,
     TrendState,
 )
-from backend.exchange import BitMartFuturesMarketDataAdapter, ExchangeName, MarketType
+from backend.exchange import BitMartFuturesMarketDataAdapter, ExchangeName, HistoricalIntegrityPolicy, HistoricalIntegrityReport, MarketType
 from backend.models import Candle, Timeframe, Trade
 from backend.pipelines.candle import CandleClosedEvent, OneMinuteCandlePipeline
 from backend.pipelines.market_data import (
@@ -122,6 +123,7 @@ class RuntimeHealth:
     state: RuntimeState
     mode: RuntimeMode
     components: tuple[ComponentHealth, ...]
+    historical_integrity: HistoricalIntegrityReport | None = None
 
     @property
     def is_healthy(self) -> bool:
@@ -133,12 +135,30 @@ class RuntimeHealth:
 
 
 @dataclass(frozen=True, slots=True)
+class AoiEvaluationDiagnostics:
+    """Runtime-only AOI evaluation diagnostics for historical acceptance testing."""
+
+    symbol: str
+    timeframe: AoiTimeframe
+    evaluated: bool
+    reason_code: str
+    candle_count: int
+    swing_count: int
+    trend_available: bool
+    candidate_count: int = 0
+    active_count: int = 0
+    broken_count: int = 0
+    archived_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class HistoricalRuntimeConfig:
     """Historical runtime input config for M28 local API visualization."""
 
     request: HistoricalCandleRequest
     data_root: Path = Path("data") / "historical"
     download: bool = False
+    integrity_policy: HistoricalIntegrityPolicy = HistoricalIntegrityPolicy.STRICT
 
 
 class RuntimeAlreadyStartedError(RuntimeError):
@@ -240,6 +260,7 @@ class BackendRuntime:
         )
         self.aoi_engine = AoiEngine()
         self._aoi_evaluations: dict[tuple[str, AoiTimeframe], AoiEvaluation] = {}
+        self._aoi_diagnostics: dict[tuple[str, AoiTimeframe], AoiEvaluationDiagnostics] = {}
         self.replay_controller = ReplayController(
             self.event_bus,
             HistoricalTradeReplaySource(()),
@@ -254,6 +275,7 @@ class BackendRuntime:
         self._demo_seeded = False
         self._historical_loaded = False
         self._historical_candle_count = 0
+        self._historical_integrity_report: HistoricalIntegrityReport | None = None
         self._logger = get_logger(__name__)
 
     @property
@@ -344,11 +366,17 @@ class BackendRuntime:
                 ComponentStatus.READY,
                 str(self._historical_candle_count),
             ),
+            ComponentHealth(
+                "historical_integrity",
+                self._historical_integrity_component_status(),
+                self._historical_integrity_component_message(),
+            ),
         ]
         return RuntimeHealth(
             state=self._state,
             mode=self.mode,
             components=tuple(components),
+            historical_integrity=self._historical_integrity_report,
         )
 
     def start_replay(
@@ -418,6 +446,7 @@ class BackendRuntime:
         )
         self.aoi_engine = AoiEngine()
         self._aoi_evaluations = {}
+        self._aoi_diagnostics = {}
         self._structure_engines = {}
         self._trend_engines = {}
         self._trend_snapshots = {}
@@ -430,6 +459,7 @@ class BackendRuntime:
         self._demo_seeded = False
         self._historical_loaded = False
         self._historical_candle_count = 0
+        self._historical_integrity_report = None
         self._historical_live_min_trade_timestamp_ms = None
 
     def run_scanner(
@@ -528,6 +558,7 @@ class BackendRuntime:
                 alignment.missing_timeframes if alignment is not None else ()
             ),
             alignment_score=alignment.alignment_score if alignment is not None else None,
+            historical_integrity=self._historical_integrity_report,
         )
 
     def evaluate_aois(
@@ -551,6 +582,7 @@ class BackendRuntime:
         )
         evaluation = self._merge_previous_aoi_lifecycle(symbol, timeframe, leg, evaluation)
         self._aoi_evaluations[(symbol, timeframe)] = evaluation
+        self._record_aoi_evaluation(symbol, timeframe, evaluation)
         return evaluation
 
     def list_aois(
@@ -570,6 +602,19 @@ class BackendRuntime:
                 if (symbol, item) in self._aoi_evaluations
                 else ()
             )
+        )
+
+    def aoi_diagnostics(
+        self,
+        *,
+        symbol: str,
+        timeframe: AoiTimeframe | None = None,
+    ) -> tuple[AoiEvaluationDiagnostics, ...]:
+        timeframes = (timeframe,) if timeframe is not None else tuple(AoiTimeframe)
+        return tuple(
+            diagnostic
+            for item in timeframes
+            if (diagnostic := self._aoi_diagnostics.get((symbol, item))) is not None
         )
 
     def evaluate_aoi_location(
@@ -638,7 +683,7 @@ class BackendRuntime:
             )
         overlaps = self.list_aoi_overlaps(symbol=symbol, confluence_weight=confluence_weight)
         eligible = any(location.gate_open for location in locations)
-        reason_codes = self._aoi_gate_reason_codes(active_aois, tuple(locations), overlaps, eligible)
+        reason_codes = self._aoi_gate_reason_codes(symbol, active_aois, tuple(locations), overlaps, eligible)
         return AoiGateResult(
             symbol=symbol,
             eligible=eligible,
@@ -650,6 +695,7 @@ class BackendRuntime:
 
     def _aoi_gate_reason_codes(
         self,
+        symbol: str,
         active_aois: tuple[AreaOfInterest, ...],
         locations: tuple[AoiLocationResult, ...],
         overlaps: tuple[AoiOverlap, ...],
@@ -657,7 +703,7 @@ class BackendRuntime:
     ) -> tuple[str, ...]:
         codes: list[str] = []
         if not active_aois:
-            codes.append("aoi_data_missing")
+            codes.append(self._empty_aoi_reason_code(symbol))
         if any(area.timeframe is AoiTimeframe.WEEKLY for area in active_aois):
             codes.append("weekly_aoi_active")
         if any(area.timeframe is AoiTimeframe.DAILY for area in active_aois):
@@ -673,7 +719,7 @@ class BackendRuntime:
                 codes.append("aoi_location_entry_window")
             elif location.state is AoiLocationState.MOVED_AWAY:
                 codes.append("aoi_moved_away")
-        if not eligible and "aoi_data_missing" not in codes:
+        if not eligible and "aoi_data_missing" not in codes and "no_active_aoi" not in codes:
             codes.append("aoi_location_not_eligible")
         return tuple(dict.fromkeys(codes))
 
@@ -714,6 +760,88 @@ class BackendRuntime:
                 *transitioned,
                 *(area for area in evaluation.areas if area.aoi_id not in transitioned_ids),
             ),
+        )
+
+    def _empty_aoi_reason_code(self, symbol: str) -> str:
+        diagnostics = tuple(
+            self._aoi_diagnostics.get((symbol, timeframe))
+            for timeframe in (AoiTimeframe.WEEKLY, AoiTimeframe.DAILY)
+        )
+        if any(item is not None and item.evaluated for item in diagnostics):
+            return "no_active_aoi"
+        return "aoi_data_missing"
+
+    def _record_aoi_evaluation(
+        self,
+        symbol: str,
+        timeframe: AoiTimeframe,
+        evaluation: AoiEvaluation,
+    ) -> None:
+        areas = evaluation.areas
+        diagnostic = AoiEvaluationDiagnostics(
+            symbol=symbol,
+            timeframe=timeframe,
+            evaluated=True,
+            reason_code="aoi_evaluated",
+            candle_count=len(self.candle_store.list(symbol, timeframe.to_timeframe())),
+            swing_count=len(self.structure_store.list(symbol, timeframe.to_timeframe()).swings),
+            trend_available=self.trend_store.get(symbol, timeframe.to_timeframe()).update is not None,
+            candidate_count=len(evaluation.candidates),
+            active_count=sum(area.state is AoiState.ACTIVE for area in areas),
+            broken_count=sum(area.state is AoiState.BROKEN for area in areas),
+            archived_count=sum(area.state is AoiState.ARCHIVED for area in areas),
+        )
+        self._aoi_diagnostics[(symbol, timeframe)] = diagnostic
+        self._logger.info(
+            "AOI evaluation completed",
+            extra={
+                "symbol": symbol,
+                "timeframe": timeframe.value,
+                "weekly_candle_count": len(self.candle_store.list(symbol, Timeframe.WEEKLY)),
+                "daily_candle_count": len(self.candle_store.list(symbol, Timeframe.DAILY)),
+                "candle_count": diagnostic.candle_count,
+                "swing_count": diagnostic.swing_count,
+                "trend_available": diagnostic.trend_available,
+                "candidate_count": diagnostic.candidate_count,
+                "active_count": diagnostic.active_count,
+                "broken_count": diagnostic.broken_count,
+                "archived_count": diagnostic.archived_count,
+            },
+        )
+
+    def _record_aoi_missing_inputs(
+        self,
+        symbol: str,
+        timeframe: AoiTimeframe,
+        reason: str,
+    ) -> None:
+        candle_count = len(self.candle_store.list(symbol, timeframe.to_timeframe()))
+        swing_count = len(self.structure_store.list(symbol, timeframe.to_timeframe()).swings)
+        trend_available = self.trend_store.get(symbol, timeframe.to_timeframe()).update is not None
+        no_active_leg = reason.startswith("No active") and candle_count > 0 and swing_count > 0 and trend_available
+        diagnostic = AoiEvaluationDiagnostics(
+            symbol=symbol,
+            timeframe=timeframe,
+            evaluated=no_active_leg,
+            reason_code="no_active_aoi" if no_active_leg else "aoi_data_missing",
+            candle_count=candle_count,
+            swing_count=swing_count,
+            trend_available=trend_available,
+        )
+        self._aoi_diagnostics[(symbol, timeframe)] = diagnostic
+        self._logger.info(
+            "AOI evaluation input assessment completed",
+            extra={
+                "symbol": symbol,
+                "timeframe": timeframe.value,
+                "weekly_candle_count": len(self.candle_store.list(symbol, Timeframe.WEEKLY)),
+                "daily_candle_count": len(self.candle_store.list(symbol, Timeframe.DAILY)),
+                "candle_count": diagnostic.candle_count,
+                "swing_count": diagnostic.swing_count,
+                "trend_available": diagnostic.trend_available,
+                "reason_code": diagnostic.reason_code,
+                "reason": reason,
+            },
         )
 
     def evaluate_risk(
@@ -763,6 +891,21 @@ class BackendRuntime:
                     "runtime_state": self.state.value,
                     "mode": self.mode.value,
                     "demo_data_enabled": self.demo_data_enabled,
+                    "historical_integrity_status": (
+                        self._historical_integrity_report.status.value
+                        if self._historical_integrity_report is not None
+                        else None
+                    ),
+                    "historical_integrity_complete": (
+                        self._historical_integrity_report.complete
+                        if self._historical_integrity_report is not None
+                        else None
+                    ),
+                    "historical_gap_count": (
+                        self._historical_integrity_report.gap_count
+                        if self._historical_integrity_report is not None
+                        else None
+                    ),
                 },
             ),
         )
@@ -866,6 +1009,21 @@ class BackendRuntime:
                 "minimum_risk_reward": minimum_risk_reward,
                 "readiness_state": readiness.overall_state.value,
                 "readiness_reason": readiness.reason,
+                "historical_integrity_status": (
+                    self._historical_integrity_report.status.value
+                    if self._historical_integrity_report is not None
+                    else None
+                ),
+                "historical_integrity_complete": (
+                    self._historical_integrity_report.complete
+                    if self._historical_integrity_report is not None
+                    else None
+                ),
+                "historical_gap_count": (
+                    self._historical_integrity_report.gap_count
+                    if self._historical_integrity_report is not None
+                    else None
+                ),
                 "aoi_gate_eligible": aoi_gate.eligible,
                 "aoi_reason_codes": ",".join(aoi_gate.reason_codes),
             },
@@ -995,29 +1153,74 @@ class BackendRuntime:
         if self.historical_config is None:
             raise RuntimeError("Historical runtime mode requires historical_config")
 
-        candles = self._historical_candles()
-        for candle in candles:
-            self._publish_historical_candle(candle)
+        historical_result = self._historical_candles()
+        candles = historical_result.candles
+        self._historical_integrity_report = historical_result.integrity_report
+        if historical_result.integrity_report.complete:
+            for candle in candles:
+                self._publish_historical_candle(candle)
+        else:
+            if isinstance(self.candle_store, InMemoryCandleStore):
+                self.candle_store.save_many(candles)
+            else:
+                for candle in candles:
+                    self._ensure_candle_stored(candle)
+            self._logger.warning(
+                "Loaded incomplete historical data without higher-timeframe aggregation "
+                "policy=%s status=%s symbol=%s timeframe=%s requested_candle_count=%s "
+                "loaded_candle_count=%s gap_count=%s total_missing_candles=%s",
+                historical_result.integrity_report.policy.value,
+                historical_result.integrity_report.status.value,
+                historical_result.integrity_report.symbol,
+                historical_result.integrity_report.timeframe.value,
+                historical_result.integrity_report.requested_candle_count,
+                historical_result.integrity_report.loaded_candle_count,
+                historical_result.integrity_report.gap_count,
+                historical_result.integrity_report.total_missing_candles,
+            )
         self._historical_candle_count = len(candles)
         self._set_historical_live_boundary(candles)
         self._historical_loaded = True
         self._seed_cached_aois_if_possible()
         self._logger.info("Loaded historical candles into runtime")
 
-    def _historical_candles(self) -> tuple[Candle, ...]:
+    def _historical_candles(self) -> HistoricalCandleLoadResult:
         if self.historical_config is None:
             raise RuntimeError("Historical runtime mode requires historical_config")
         if self._historical_loader is not None:
-            return self._historical_loader.load(self.historical_config.request)
+            candles = self._historical_loader.load(self.historical_config.request)
+            report = self._valid_historical_integrity_report(len(candles))
+            return HistoricalCandleLoadResult(candles=candles, integrity_report=report)
 
         store = HistoricalCandleFileStore(self.historical_config.data_root)
         if not self.historical_config.download:
-            return store.load(self.historical_config.request)
+            return store.load_result(
+                self.historical_config.request,
+                integrity_policy=self.historical_config.integrity_policy,
+            )
 
         downloader = BitMartHistoricalCandleDownloader()
-        candles = downloader.load(self.historical_config.request)
-        store.save(self.historical_config.request, candles)
-        return candles
+        result = downloader.load_result(
+            self.historical_config.request,
+            integrity_policy=self.historical_config.integrity_policy,
+        )
+        store.save_result(self.historical_config.request, result)
+        return result
+
+    def _valid_historical_integrity_report(self, loaded_candle_count: int) -> HistoricalIntegrityReport:
+        if self.historical_config is None:
+            raise RuntimeError("Historical runtime mode requires historical_config")
+        request = self.historical_config.request
+        from backend.engines.historical.loader import expected_candle_count, exchange_request_from_historical_request
+
+        return HistoricalIntegrityReport.valid(
+            exchange_request_from_historical_request(
+                request,
+                integrity_policy=self.historical_config.integrity_policy,
+            ),
+            requested_candle_count=expected_candle_count(request),
+            loaded_candle_count=loaded_candle_count,
+        )
 
     def _publish_historical_candle(self, candle: Candle) -> None:
         """Publish completed historical candles through existing runtime paths."""
@@ -1071,11 +1274,13 @@ class BackendRuntime:
                     timeframe=timeframe,
                     sizing=sizing,
                 )
-            except ValueError:
+            except ValueError as exc:
+                self._record_aoi_missing_inputs(self.active_symbol, timeframe, str(exc))
                 self._logger.debug(
-                    "Demo AOI seed skipped for %s %s",
+                    "AOI seed skipped for %s %s: %s",
                     self.active_symbol,
                     timeframe.value,
+                    exc,
                 )
         if self.demo_data_enabled:
             self._seed_synthetic_demo_aois_if_needed()
@@ -1237,6 +1442,21 @@ class BackendRuntime:
         if self._historical_loaded:
             return f"loaded {self._historical_candle_count} {request.timeframe.value} candles for {request.symbol}"
         return f"ready to load {request.symbol} {request.timeframe.value}"
+
+    def _historical_integrity_component_status(self) -> ComponentStatus:
+        if self._historical_integrity_report is None:
+            return ComponentStatus.DISABLED if not self.historical_data_enabled else ComponentStatus.READY
+        return ComponentStatus.READY
+
+    def _historical_integrity_component_message(self) -> str:
+        report = self._historical_integrity_report
+        if report is None:
+            return "no historical integrity report"
+        return (
+            f"policy={report.policy.value} status={report.status.value} complete={report.complete} "
+            f"requested={report.requested_candle_count} loaded={report.loaded_candle_count} "
+            f"gaps={report.gap_count} missing={report.total_missing_candles}"
+        )
 
     def _replay_component_message(self) -> str:
         replay_status = self.replay_status()

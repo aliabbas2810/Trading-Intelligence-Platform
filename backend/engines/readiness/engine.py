@@ -9,6 +9,7 @@ from backend.engines.readiness.models import (
     StructureTimeframeReadiness,
     TrendTimeframeReadiness,
 )
+from backend.exchange.models import HistoricalIntegrityReport
 from backend.models import Timeframe
 from backend.storage import CandleStore
 
@@ -57,7 +58,13 @@ class AnalysisReadinessEngine:
         self._structure_store = structure_store
         self._trend_store = trend_store
 
-    def evaluate(self, symbol: str, alignment_missing_timeframes: tuple[Timeframe, ...], alignment_score: int | None) -> AnalysisReadiness:
+    def evaluate(
+        self,
+        symbol: str,
+        alignment_missing_timeframes: tuple[Timeframe, ...],
+        alignment_score: int | None,
+        historical_integrity: HistoricalIntegrityReport | None = None,
+    ) -> AnalysisReadiness:
         """Inspect existing read stores for historical warm-up diagnostics."""
 
         candle_readiness = tuple(
@@ -88,6 +95,7 @@ class AnalysisReadinessEngine:
             structure_readiness=structure_readiness,
             trend_readiness=trend_readiness,
             alignment_readiness=alignment_readiness,
+            historical_integrity=historical_integrity,
         )
         entry_readiness = not missing_reasons
         return AnalysisReadiness(
@@ -104,9 +112,11 @@ class AnalysisReadinessEngine:
                 candle_readiness=candle_readiness,
                 missing_timeframes=missing_timeframes,
                 missing_reasons=missing_reasons,
+                historical_integrity=historical_integrity,
             ),
-            reason=self._reason(missing_timeframes, missing_reasons),
+            reason=self._reason(missing_timeframes, missing_reasons, historical_integrity),
             missing_reasons=missing_reasons,
+            historical_integrity=historical_integrity,
         )
 
     def _structure_readiness(self, symbol: str, timeframe: Timeframe) -> StructureTimeframeReadiness:
@@ -135,8 +145,12 @@ class AnalysisReadinessEngine:
         structure_readiness: tuple[StructureTimeframeReadiness, ...],
         trend_readiness: tuple[TrendTimeframeReadiness, ...],
         alignment_readiness: AlignmentReadiness,
+        historical_integrity: HistoricalIntegrityReport | None,
     ) -> tuple[str, ...]:
         reasons = [f"{timeframe.value}_candles" for timeframe in missing_timeframes]
+        if historical_integrity is not None and not historical_integrity.complete:
+            reasons.append("historical_data_gap")
+            reasons.append(f"historical_integrity_{historical_integrity.status.value}")
         reasons.extend(
             f"{item.timeframe.value}_structure"
             for item in structure_readiness
@@ -157,16 +171,26 @@ class AnalysisReadinessEngine:
         candle_readiness: tuple[CandleTimeframeReadiness, ...],
         missing_timeframes: tuple[Timeframe, ...],
         missing_reasons: tuple[str, ...],
+        historical_integrity: HistoricalIntegrityReport | None,
     ) -> AnalysisReadinessState:
         if not any(item.available for item in candle_readiness):
             return AnalysisReadinessState.INSUFFICIENT_DATA
+        if historical_integrity is not None and not historical_integrity.complete:
+            return AnalysisReadinessState.DEGRADED
         if missing_timeframes:
             return AnalysisReadinessState.INSUFFICIENT_DATA
         if missing_reasons:
             return AnalysisReadinessState.WARMING_UP
         return AnalysisReadinessState.READY
 
-    def _reason(self, missing_timeframes: tuple[Timeframe, ...], missing_reasons: tuple[str, ...]) -> str:
+    def _reason(
+        self,
+        missing_timeframes: tuple[Timeframe, ...],
+        missing_reasons: tuple[str, ...],
+        historical_integrity: HistoricalIntegrityReport | None,
+    ) -> str:
+        if historical_integrity is not None and not historical_integrity.complete:
+            return f"historical_integrity_{historical_integrity.status.value}"
         if missing_timeframes:
             return "insufficient_historical_range"
         if missing_reasons:

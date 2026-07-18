@@ -33,6 +33,7 @@ def test_load_default_settings_validates_typed_config() -> None:
     )
     assert settings.storage.candle_path == Path("data/candles")
     assert settings.demo.enabled
+    assert settings.historical_data.integrity_policy == "strict"
 
 
 def test_invalid_settings_raise_clear_error(tmp_path: Path) -> None:
@@ -58,6 +59,8 @@ storage:
   format: parquet
 logging:
   level: INFO
+historical_data:
+  integrity_policy: impossible
 """,
         encoding="utf-8",
     )

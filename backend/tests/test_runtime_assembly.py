@@ -15,7 +15,17 @@ from backend.app import (
 )
 from backend.app.cli import main
 from backend.config import PlatformSettings, load_settings
-from backend.engines.historical import HistoricalCandleFileStore, HistoricalCandleRequest
+from backend.engines.historical import HistoricalCandleFileStore, HistoricalCandleLoadResult, HistoricalCandleRequest
+from backend.exchange import (
+    ExchangeHistoricalCandleRequest,
+    ExchangeName,
+    HistoricalDataGap,
+    HistoricalGapRecoveryStatus,
+    HistoricalIntegrityPolicy,
+    HistoricalIntegrityReport,
+    HistoricalIntegrityStatus,
+    MarketType,
+)
 from backend.models import Candle, Timeframe, Trade
 from backend.pipelines.market_data import BitMartTradeStreamClient, MarketDataConnectionStatus, TradeReceivedEvent
 
@@ -119,6 +129,88 @@ def test_historical_runtime_mode_does_not_seed_demo_data(tmp_path: Path) -> None
     candles = runtime.visualization_api.get_candles("BTCUSDT", Timeframe.ONE_MINUTE)
     assert len(candles) == 4
     assert {candle.open_time_ms for candle in candles} == {0, 60_000, 120_000, 180_000}
+
+
+def test_historical_runtime_warn_policy_loads_partial_cache_with_degraded_integrity(tmp_path: Path) -> None:
+    request = historical_request()
+    report = incomplete_report(request, policy=HistoricalIntegrityPolicy.WARN)
+    HistoricalCandleFileStore(tmp_path).save_result(
+        request,
+        HistoricalCandleLoadResult(
+            candles=historical_fixture_candles(count=3),
+            integrity_report=report,
+        ),
+    )
+    runtime = BackendRuntime(
+        mode=RuntimeMode.HISTORICAL,
+        historical_config=HistoricalRuntimeConfig(
+            request=request,
+            data_root=tmp_path,
+            integrity_policy=HistoricalIntegrityPolicy.WARN,
+        ),
+    )
+
+    runtime.start()
+    health = runtime.health()
+    components = {component.name: component for component in health.components}
+
+    assert runtime.visualization_api.get_candles("BTCUSDT", Timeframe.ONE_MINUTE)
+    assert components["historical_candles_loaded"].message == "3"
+    assert components["historical_integrity"].message.startswith("policy=warn status=degraded complete=False")
+    assert health.historical_integrity == report
+    readiness = runtime.evaluate_data_readiness(symbol="BTCUSDT")
+    assert readiness.overall_state.value == "DEGRADED"
+    assert "historical_data_gap" in readiness.missing_reasons
+    assert runtime.evaluate_trading_intelligence(symbol="BTCUSDT").metadata["historical_integrity_status"] == "degraded"
+    checklist = runtime.evaluate_checklist(symbol="BTCUSDT")
+    assert any(item.id == "data_quality.historical_integrity" and item.status.value == "WARNING" for item in checklist.items)
+
+
+def test_historical_runtime_allow_policy_loads_partial_cache_with_incomplete_integrity(tmp_path: Path) -> None:
+    request = historical_request()
+    report = incomplete_report(request, policy=HistoricalIntegrityPolicy.ALLOW)
+    HistoricalCandleFileStore(tmp_path).save_result(
+        request,
+        HistoricalCandleLoadResult(
+            candles=historical_fixture_candles(count=3),
+            integrity_report=report,
+        ),
+    )
+    runtime = BackendRuntime(
+        mode=RuntimeMode.HISTORICAL,
+        historical_config=HistoricalRuntimeConfig(
+            request=request,
+            data_root=tmp_path,
+            integrity_policy=HistoricalIntegrityPolicy.ALLOW,
+        ),
+    )
+
+    runtime.start()
+
+    assert runtime.health().historical_integrity == report
+    assert runtime.evaluate_data_readiness(symbol="BTCUSDT").reason == "historical_integrity_incomplete"
+
+
+def test_historical_runtime_strict_policy_rejects_partial_cache(tmp_path: Path) -> None:
+    request = historical_request()
+    HistoricalCandleFileStore(tmp_path).save_result(
+        request,
+        HistoricalCandleLoadResult(
+            candles=historical_fixture_candles(count=3),
+            integrity_report=incomplete_report(request, policy=HistoricalIntegrityPolicy.WARN),
+        ),
+    )
+    runtime = BackendRuntime(
+        mode=RuntimeMode.HISTORICAL,
+        historical_config=HistoricalRuntimeConfig(
+            request=request,
+            data_root=tmp_path,
+            integrity_policy=HistoricalIntegrityPolicy.STRICT,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="Strict historical load rejected incomplete cache"):
+        runtime.start()
 
 
 def test_historical_live_runtime_loads_fixture_and_starts_stream(tmp_path: Path) -> None:
@@ -307,6 +399,11 @@ def test_cli_rejects_removed_live_binance_option() -> None:
         main(["--live-binance", "--once"])
 
 
+def test_cli_rejects_invalid_historical_integrity_policy() -> None:
+    with pytest.raises(SystemExit):
+        main(["--historical", "--historical-integrity-policy", "sometimes", "--once"])
+
+
 def test_cli_entrypoint_starts_historical_once(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -337,6 +434,7 @@ def test_cli_entrypoint_starts_historical_once(
     assert exit_code == 0
     assert "Historical preflight:" in captured.out
     assert "expected_1m_candles=4" in captured.out
+    assert "integrity_policy=strict" in captured.out
     assert "range is shorter than 1d" in captured.out
     assert '"mode": "historical"' in captured.out
     assert '"state": "running"' in captured.out
@@ -476,3 +574,41 @@ def historical_fixture_candles(*, count: int) -> tuple[Candle, ...]:
             ),
         )
     return tuple(candles)
+
+
+def incomplete_report(
+    request: HistoricalCandleRequest,
+    *,
+    policy: HistoricalIntegrityPolicy,
+) -> HistoricalIntegrityReport:
+    gap = HistoricalDataGap(
+        symbol=request.symbol,
+        timeframe=request.timeframe,
+        start_open_time_ms=180_000,
+        end_open_time_ms=240_000,
+        missing_candle_count=1,
+        missing_open_times_ms=(180_000,),
+        retry_count=3,
+        exchange=ExchangeName.BITMART,
+        recovery_status=HistoricalGapRecoveryStatus.UNRECOVERABLE,
+        detected_at_ms=300_000,
+    )
+    return HistoricalIntegrityReport.from_gaps(
+        ExchangeHistoricalCandleRequest(
+            exchange=ExchangeName.BITMART,
+            market_type=MarketType.USDT_M_PERPETUAL,
+            symbol=request.symbol,
+            timeframe=request.timeframe,
+            start_time_ms=request.start_time_ms,
+            end_time_ms=request.end_time_ms,
+            integrity_policy=policy,
+        ),
+        status=(
+            HistoricalIntegrityStatus.DEGRADED
+            if policy is HistoricalIntegrityPolicy.WARN
+            else HistoricalIntegrityStatus.INCOMPLETE
+        ),
+        gaps=(gap,),
+        requested_candle_count=4,
+        loaded_candle_count=3,
+    )

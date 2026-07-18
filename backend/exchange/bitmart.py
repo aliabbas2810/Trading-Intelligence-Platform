@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from time import sleep, time
 from typing import Callable, Protocol, cast
-from urllib.parse import urlencode
 from urllib.error import HTTPError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from backend.exchange.models import (
@@ -15,7 +16,12 @@ from backend.exchange.models import (
     ContractStatus,
     ExchangeHistoricalCandleRequest,
     ExchangeName,
+    HistoricalDataGap,
+    HistoricalGapRecoveryStatus,
     HistoricalCandleResult,
+    HistoricalIntegrityPolicy,
+    HistoricalIntegrityReport,
+    HistoricalIntegrityStatus,
     MarketType,
     RateLimitMetadata,
 )
@@ -26,6 +32,46 @@ from backend.pipelines.timeframe.aggregation import timeframe_duration_ms
 BITMART_FUTURES_BASE_URL = "https://api-cloud-v2.bitmart.com"
 ONE_MINUTE_MS = 60_000
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class MissingCandleInterval:
+    start_time_ms: int
+    end_time_ms: int
+    duration_ms: int
+
+    @property
+    def timestamps_ms(self) -> tuple[int, ...]:
+        return tuple(range(self.start_time_ms, self.end_time_ms, self.duration_ms))
+
+
+class HistoricalDataGapError(RuntimeError):
+    """Raised when BitMart historical candles remain non-contiguous after bounded recovery."""
+
+    def __init__(
+        self,
+        *,
+        symbol: str,
+        timeframe: Timeframe,
+        interval: MissingCandleInterval,
+        retry_count: int,
+        page_context: str,
+    ) -> None:
+        super().__init__(
+            "BitMart historical data gap could not be recovered "
+            f"symbol={symbol} timeframe={timeframe.value} "
+            f"missing_start_time_ms={interval.start_time_ms} "
+            f"missing_end_time_ms={interval.end_time_ms} "
+            f"missing_start_utc={format_utc_ms(interval.start_time_ms)} "
+            f"missing_end_utc={format_utc_ms(interval.end_time_ms)} "
+            f"missing_timestamps_ms={interval.timestamps_ms} "
+            f"retry_count={retry_count} page_context={page_context}",
+        )
+        self.symbol = symbol
+        self.timeframe = timeframe
+        self.interval = interval
+        self.retry_count = retry_count
+        self.page_context = page_context
 
 
 class HttpTransport(Protocol):
@@ -77,12 +123,16 @@ class BitMartFuturesMarketDataAdapter:
         page_size: int = 500,
         clock_ms: Callable[[], int] | None = None,
         sleeper: Callable[[float], None] | None = None,
+        max_gap_recovery_attempts: int = 3,
+        gap_recovery_backoff_seconds: float = 0.2,
     ) -> None:
         self._transport = transport or UrlLibJsonTransport()
         self._retry_policy = retry_policy or RetryPolicy()
         self._page_size = page_size
         self._clock_ms = clock_ms or (lambda: int(time() * 1000))
         self._sleeper = sleeper or sleep
+        self._max_gap_recovery_attempts = max(1, max_gap_recovery_attempts)
+        self._gap_recovery_backoff_seconds = max(0.0, gap_recovery_backoff_seconds)
         self._metadata: dict[str, ContractMetadata] = {}
 
     def discover_contracts(self) -> tuple[ContractMetadata, ...]:
@@ -136,7 +186,16 @@ class BitMartFuturesMarketDataAdapter:
                 candles[candle.open_time_ms] = candle
             next_cursor = page.next_start_time_ms
             LOGGER.info(
-                "Fetched BitMart historical candle page",
+                "Fetched BitMart historical candle page "
+                "symbol=%s timeframe=%s page_start_time_ms=%s page_end_time_ms=%s "
+                "returned_candle_count=%s next_cursor_time_ms=%s total_accumulated_candle_count=%s",
+                request.symbol,
+                request.timeframe.value,
+                cursor,
+                page_end_time_ms,
+                len(page.candles),
+                next_cursor,
+                len(candles),
                 extra={
                     "symbol": request.symbol,
                     "timeframe": request.timeframe.value,
@@ -145,6 +204,12 @@ class BitMartFuturesMarketDataAdapter:
                     "limit": min(request.limit, self._page_size),
                     "http_status": 200,
                     "returned_candle_count": len(page.candles),
+                    "first_returned_open_time_ms": page.candles[0].open_time_ms,
+                    "first_returned_open_utc": format_utc_ms(page.candles[0].open_time_ms),
+                    "last_returned_open_time_ms": page.candles[-1].open_time_ms,
+                    "last_returned_open_utc": format_utc_ms(page.candles[-1].open_time_ms),
+                    "expected_next_time_ms": page_end_time_ms,
+                    "expected_next_utc": format_utc_ms(page_end_time_ms),
                     "next_cursor_time_ms": next_cursor,
                     "total_accumulated_candle_count": len(candles),
                 },
@@ -167,12 +232,53 @@ class BitMartFuturesMarketDataAdapter:
                 )
             cursor = next_cursor
         sorted_candles = tuple(candles[key] for key in sorted(candles))
-        self._validate_contiguous_candles(sorted_candles, request, end_time_ms, duration_ms)
+        sorted_candles, recovery_pages, unrecovered_gaps = self._recover_gaps_if_needed(
+            sorted_candles,
+            request,
+            end_time_ms,
+            duration_ms,
+            window_ms,
+        )
+        pages += recovery_pages
+        requested_candle_count = max(0, (end_time_ms - request.start_time_ms) // duration_ms)
+        if not unrecovered_gaps:
+            self._validate_contiguous_candles(sorted_candles, request, end_time_ms, duration_ms)
+            integrity_report = HistoricalIntegrityReport.valid(
+                request,
+                requested_candle_count=requested_candle_count,
+                loaded_candle_count=len(sorted_candles),
+            )
+        else:
+            integrity_report = HistoricalIntegrityReport.from_gaps(
+                request,
+                status=(
+                    HistoricalIntegrityStatus.DEGRADED
+                    if request.integrity_policy is HistoricalIntegrityPolicy.WARN
+                    else HistoricalIntegrityStatus.INCOMPLETE
+                ),
+                gaps=unrecovered_gaps,
+                requested_candle_count=requested_candle_count,
+                loaded_candle_count=len(sorted_candles),
+            )
+            LOGGER.warning(
+                "Continuing with incomplete BitMart historical data "
+                "policy=%s status=%s symbol=%s timeframe=%s requested_candle_count=%s "
+                "loaded_candle_count=%s gap_count=%s total_missing_candles=%s",
+                integrity_report.policy.value,
+                integrity_report.status.value,
+                request.symbol,
+                request.timeframe.value,
+                integrity_report.requested_candle_count,
+                integrity_report.loaded_candle_count,
+                integrity_report.gap_count,
+                integrity_report.total_missing_candles,
+            )
         return HistoricalCandleResult(
             request=request,
             candles=sorted_candles,
             pages=pages,
             latest_completed_time_ms=latest_completed,
+            integrity_report=integrity_report,
         )
 
     def fetch_historical_candle_page(
@@ -284,6 +390,192 @@ class BitMartFuturesMarketDataAdapter:
                 f"symbol={request.symbol} timeframe={request.timeframe.value} "
                 f"expected_next_open_time_ms={expected_time} requested_end_time_ms={end_time_ms}",
             )
+
+    def _recover_gaps_if_needed(
+        self,
+        candles: tuple[Candle, ...],
+        request: ExchangeHistoricalCandleRequest,
+        end_time_ms: int,
+        duration_ms: int,
+        window_ms: int,
+    ) -> tuple[tuple[Candle, ...], int, tuple[HistoricalDataGap, ...]]:
+        recovery_pages = 0
+        merged = {candle.open_time_ms: candle for candle in candles}
+        unrecovered_gaps: list[HistoricalDataGap] = []
+        while True:
+            sorted_candles = tuple(merged[key] for key in sorted(merged))
+            gaps = self._missing_intervals(sorted_candles, request.start_time_ms, end_time_ms, duration_ms)
+            if not gaps:
+                LOGGER.info(
+                    "BitMart historical contiguous validation passed "
+                    "symbol=%s timeframe=%s candle_count=%s start_utc=%s end_utc=%s",
+                    request.symbol,
+                    request.timeframe.value,
+                    len(sorted_candles),
+                    format_utc_ms(request.start_time_ms),
+                    format_utc_ms(end_time_ms),
+                    extra={
+                        "symbol": request.symbol,
+                        "timeframe": request.timeframe.value,
+                        "candle_count": len(sorted_candles),
+                        "start_time_ms": request.start_time_ms,
+                        "start_utc": format_utc_ms(request.start_time_ms),
+                        "end_time_ms": end_time_ms,
+                        "end_utc": format_utc_ms(end_time_ms),
+                    },
+                )
+                return sorted_candles, recovery_pages, tuple(unrecovered_gaps)
+            for interval in gaps:
+                recovered, pages, unrecovered = self._recover_missing_interval(request, interval, duration_ms, window_ms)
+                recovery_pages += pages
+                if unrecovered is not None:
+                    unrecovered_gaps.append(unrecovered)
+                    continue
+                for candle in recovered:
+                    merged[candle.open_time_ms] = candle
+            if unrecovered_gaps:
+                return tuple(merged[key] for key in sorted(merged)), recovery_pages, tuple(unrecovered_gaps)
+
+    def _missing_intervals(
+        self,
+        candles: tuple[Candle, ...],
+        start_time_ms: int,
+        end_time_ms: int,
+        duration_ms: int,
+    ) -> tuple[MissingCandleInterval, ...]:
+        missing: list[MissingCandleInterval] = []
+        expected_time_ms = start_time_ms
+        for candle in candles:
+            if candle.open_time_ms < expected_time_ms:
+                continue
+            if candle.open_time_ms > expected_time_ms:
+                missing.append(MissingCandleInterval(expected_time_ms, candle.open_time_ms, duration_ms))
+            expected_time_ms = candle.open_time_ms + duration_ms
+        if expected_time_ms < end_time_ms:
+            missing.append(MissingCandleInterval(expected_time_ms, end_time_ms, duration_ms))
+        return tuple(missing)
+
+    def _recover_missing_interval(
+        self,
+        request: ExchangeHistoricalCandleRequest,
+        interval: MissingCandleInterval,
+        duration_ms: int,
+        window_ms: int,
+    ) -> tuple[tuple[Candle, ...], int, HistoricalDataGap | None]:
+        recovered: dict[int, Candle] = {}
+        recovery_pages = 0
+        LOGGER.warning(
+            "Detected BitMart historical gap "
+            "symbol=%s timeframe=%s missing_start_utc=%s missing_end_utc=%s missing_timestamps_ms=%s",
+            request.symbol,
+            request.timeframe.value,
+            format_utc_ms(interval.start_time_ms),
+            format_utc_ms(interval.end_time_ms),
+            interval.timestamps_ms,
+            extra={
+                "symbol": request.symbol,
+                "timeframe": request.timeframe.value,
+                "missing_start_time_ms": interval.start_time_ms,
+                "missing_start_utc": format_utc_ms(interval.start_time_ms),
+                "missing_end_time_ms": interval.end_time_ms,
+                "missing_end_utc": format_utc_ms(interval.end_time_ms),
+                "missing_timestamps_ms": interval.timestamps_ms,
+            },
+        )
+        for attempt in range(1, self._max_gap_recovery_attempts + 1):
+            attempt_recovered: dict[int, Candle] = {}
+            cursor = interval.start_time_ms
+            while cursor < interval.end_time_ms:
+                page_end_time_ms = min(cursor + window_ms, interval.end_time_ms)
+                page_request = ExchangeHistoricalCandleRequest(
+                    exchange=request.exchange,
+                    market_type=request.market_type,
+                    symbol=request.symbol,
+                    timeframe=request.timeframe,
+                    start_time_ms=cursor,
+                    end_time_ms=page_end_time_ms,
+                    limit=request.limit,
+                )
+                page = self.fetch_historical_candle_page(page_request)
+                recovery_pages += 1
+                for candle in page.candles:
+                    attempt_recovered[candle.open_time_ms] = candle
+                next_cursor = page.next_start_time_ms or page_end_time_ms
+                LOGGER.warning(
+                    "Retried BitMart historical gap page "
+                    "symbol=%s timeframe=%s attempt=%s recovery_start_utc=%s recovery_end_utc=%s "
+                    "returned_candle_count=%s next_cursor_time_ms=%s total_attempt_recovered_count=%s",
+                    request.symbol,
+                    request.timeframe.value,
+                    attempt,
+                    format_utc_ms(cursor),
+                    format_utc_ms(page_end_time_ms),
+                    len(page.candles),
+                    next_cursor,
+                    len(attempt_recovered),
+                    extra={
+                        "symbol": request.symbol,
+                        "timeframe": request.timeframe.value,
+                        "attempt": attempt,
+                        "recovery_start_time_ms": cursor,
+                        "recovery_start_utc": format_utc_ms(cursor),
+                        "recovery_end_time_ms": page_end_time_ms,
+                        "recovery_end_utc": format_utc_ms(page_end_time_ms),
+                        "returned_candle_count": len(page.candles),
+                        "next_cursor_time_ms": next_cursor,
+                        "total_attempt_recovered_count": len(attempt_recovered),
+                    },
+                )
+                if next_cursor <= cursor:
+                    raise RuntimeError(
+                        "BitMart historical gap recovery cursor did not advance "
+                        f"symbol={request.symbol} timeframe={request.timeframe.value} "
+                        f"attempt={attempt} recovery_start_time_ms={cursor} "
+                        f"recovery_end_time_ms={page_end_time_ms} next_cursor_time_ms={next_cursor}",
+                    )
+                cursor = next_cursor
+            attempt_candles = tuple(attempt_recovered[key] for key in sorted(attempt_recovered))
+            if not self._missing_intervals(attempt_candles, interval.start_time_ms, interval.end_time_ms, duration_ms):
+                return attempt_candles, recovery_pages, None
+            recovered.update(attempt_recovered)
+            if attempt < self._max_gap_recovery_attempts and self._gap_recovery_backoff_seconds:
+                self._sleeper(self._gap_recovery_backoff_seconds)
+        recovered_candles = tuple(recovered[key] for key in sorted(recovered))
+        if self._missing_intervals(recovered_candles, interval.start_time_ms, interval.end_time_ms, duration_ms):
+            gap = HistoricalDataGap(
+                symbol=request.symbol,
+                timeframe=request.timeframe,
+                start_open_time_ms=interval.start_time_ms,
+                end_open_time_ms=interval.end_time_ms,
+                missing_candle_count=len(interval.timestamps_ms),
+                missing_open_times_ms=interval.timestamps_ms,
+                retry_count=self._max_gap_recovery_attempts,
+                exchange=request.exchange,
+                recovery_status=HistoricalGapRecoveryStatus.UNRECOVERABLE,
+                detected_at_ms=self._clock_ms(),
+            )
+            LOGGER.warning(
+                "BitMart historical gap remains unrecovered "
+                "policy=%s symbol=%s timeframe=%s missing_start_utc=%s missing_end_utc=%s "
+                "missing_candle_count=%s retry_count=%s",
+                request.integrity_policy.value,
+                request.symbol,
+                request.timeframe.value,
+                format_utc_ms(interval.start_time_ms),
+                format_utc_ms(interval.end_time_ms),
+                gap.missing_candle_count,
+                self._max_gap_recovery_attempts,
+            )
+            if request.integrity_policy is not HistoricalIntegrityPolicy.STRICT:
+                return recovered_candles, recovery_pages, gap
+            raise HistoricalDataGapError(
+                symbol=request.symbol,
+                timeframe=request.timeframe,
+                interval=interval,
+                retry_count=self._max_gap_recovery_attempts,
+                page_context="narrow_gap_recovery_incomplete",
+            )
+        return recovered_candles, recovery_pages, None
 
     def _contract_rows(self, payload: object) -> tuple[dict[str, object], ...]:
         data = self._payload_data(payload)
@@ -421,6 +713,10 @@ def flatten_metadata(raw: dict[str, object]) -> dict[str, str | int | float | bo
 
 def truncate_text(value: str, *, limit: int = 1000) -> str:
     return value if len(value) <= limit else f"{value[:limit]}...<truncated>"
+
+
+def format_utc_ms(timestamp_ms: int) -> str:
+    return datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC).isoformat().replace("+00:00", "Z")
 
 
 def first_present(payload: dict[str, object], *keys: str) -> object:

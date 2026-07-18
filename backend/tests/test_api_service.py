@@ -19,7 +19,17 @@ from backend.engines.aoi import (
     AoiTimeframe,
     AreaOfInterest,
 )
-from backend.engines.historical import HistoricalCandleFileStore, HistoricalCandleRequest
+from backend.engines.historical import HistoricalCandleFileStore, HistoricalCandleLoadResult, HistoricalCandleRequest
+from backend.exchange import (
+    ExchangeHistoricalCandleRequest,
+    ExchangeName,
+    HistoricalDataGap,
+    HistoricalGapRecoveryStatus,
+    HistoricalIntegrityPolicy,
+    HistoricalIntegrityReport,
+    HistoricalIntegrityStatus,
+    MarketType,
+)
 from backend.engines.structure import (
     BreakDirection,
     BreakOfStructure,
@@ -320,6 +330,63 @@ def test_data_readiness_reports_insufficient_higher_timeframes_for_short_history
     assert checklist_items["aoi.daily"]["status"] == "MISSING"
     assert checklist_items["aoi.weekly_daily_overlap"]["status"] == "MISSING"
     assert checklist_items["aoi.location_gate"]["status"] == "MISSING"
+
+
+def test_api_exposes_degraded_historical_integrity_in_health_readiness_and_intelligence(tmp_path: Path) -> None:
+    request = HistoricalCandleRequest(
+        symbol="BTCUSDT",
+        timeframe=Timeframe.ONE_MINUTE,
+        start_time_ms=0,
+        end_time_ms=240_000,
+    )
+    report = incomplete_report(request, policy=HistoricalIntegrityPolicy.WARN)
+    HistoricalCandleFileStore(tmp_path).save_result(
+        request,
+        HistoricalCandleLoadResult(
+            candles=make_minute_fixture_candles(count=3),
+            integrity_report=report,
+        ),
+    )
+    runtime = BackendRuntime(
+        mode=RuntimeMode.HISTORICAL,
+        historical_config=HistoricalRuntimeConfig(
+            request=request,
+            data_root=tmp_path,
+            integrity_policy=HistoricalIntegrityPolicy.WARN,
+        ),
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        health = client.get("/api/health")
+        readiness = client.get("/api/data-readiness", params={"symbol": "BTCUSDT"})
+        intelligence = client.post(
+            "/api/trading-intelligence/evaluate",
+            json={"symbol": "BTCUSDT", "timeframe": "4h"},
+        )
+
+    assert health.status_code == 200
+    health_integrity = health.json()["historical_integrity"]
+    assert health_integrity["policy"] == "warn"
+    assert health_integrity["status"] == "degraded"
+    assert health_integrity["complete"] is False
+    assert health_integrity["gap_count"] == 1
+    assert health_integrity["total_missing_candles"] == 1
+
+    assert readiness.status_code == 200
+    readiness_payload = readiness.json()
+    assert readiness_payload["overall_state"] == "DEGRADED"
+    assert readiness_payload["historical_integrity"]["status"] == "degraded"
+    assert "historical_data_gap" in readiness_payload["missing_reasons"]
+
+    assert intelligence.status_code == 200
+    intelligence_payload = intelligence.json()
+    assert intelligence_payload["metadata"]["historical_integrity_status"] == "degraded"
+    assert intelligence_payload["readiness"]["historical_integrity"]["gap_count"] == 1
+    checklist_items = {
+        item["id"]: item
+        for item in intelligence_payload["checklist"]["items"]
+    }
+    assert checklist_items["data_quality.historical_integrity"]["status"] == "WARNING"
 
 
 def test_readiness_reports_generated_higher_timeframes_for_long_fixture(tmp_path: Path) -> None:
@@ -1166,6 +1233,44 @@ def make_minute_fixture_candles(*, count: int) -> tuple[Candle, ...]:
             ),
         )
     return tuple(candles)
+
+
+def incomplete_report(
+    request: HistoricalCandleRequest,
+    *,
+    policy: HistoricalIntegrityPolicy,
+) -> HistoricalIntegrityReport:
+    gap = HistoricalDataGap(
+        symbol=request.symbol,
+        timeframe=request.timeframe,
+        start_open_time_ms=180_000,
+        end_open_time_ms=240_000,
+        missing_candle_count=1,
+        missing_open_times_ms=(180_000,),
+        retry_count=3,
+        exchange=ExchangeName.BITMART,
+        recovery_status=HistoricalGapRecoveryStatus.UNRECOVERABLE,
+        detected_at_ms=300_000,
+    )
+    return HistoricalIntegrityReport.from_gaps(
+        ExchangeHistoricalCandleRequest(
+            exchange=ExchangeName.BITMART,
+            market_type=MarketType.USDT_M_PERPETUAL,
+            symbol=request.symbol,
+            timeframe=request.timeframe,
+            start_time_ms=request.start_time_ms,
+            end_time_ms=request.end_time_ms,
+            integrity_policy=policy,
+        ),
+        status=(
+            HistoricalIntegrityStatus.DEGRADED
+            if policy is HistoricalIntegrityPolicy.WARN
+            else HistoricalIntegrityStatus.INCOMPLETE
+        ),
+        gaps=(gap,),
+        requested_candle_count=4,
+        loaded_candle_count=3,
+    )
 
 
 def trend_state_for_bias(bias: DirectionalBias) -> TrendState:

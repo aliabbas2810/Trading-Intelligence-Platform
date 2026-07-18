@@ -10,6 +10,7 @@ from backend.api.service import create_app
 from backend.config import PlatformSettings, load_settings
 from backend.engines.historical import HistoricalCandleRequest
 from backend.engines.historical.loader import parse_utc_timestamp_ms
+from backend.exchange import HistoricalIntegrityPolicy
 from backend.models import Timeframe
 from backend.pipelines.timeframe.aggregation import DAILY_MS, WEEKLY_MS
 
@@ -42,6 +43,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--end", help="historical UTC ISO end, e.g. 2025-01-01T02:00:00Z")
     parser.add_argument("--download", action="store_true", help="download BitMart historical candles before loading")
     parser.add_argument("--data-root", default=str(Path("data") / "historical"), help="historical candle data root")
+    parser.add_argument(
+        "--historical-integrity-policy",
+        default=HistoricalIntegrityPolicy.STRICT.value,
+        choices=[policy.value for policy in HistoricalIntegrityPolicy],
+        help="historical candle gap policy: strict, warn, or allow",
+    )
     args = parser.parse_args(argv)
 
     mode = runtime_mode_from_args(args)
@@ -97,17 +104,21 @@ def runtime_mode_from_args(args: argparse.Namespace) -> RuntimeMode:
 
 def settings_from_args(args: argparse.Namespace) -> PlatformSettings:
     settings = load_settings()
+    updates: dict[str, object] = {
+        "historical_data": settings.historical_data.model_copy(
+            update={"integrity_policy": args.historical_integrity_policy},
+        ),
+    }
     if not (args.live_bitmart or args.historical_live):
-        return settings
-    return settings.model_copy(
+        return settings.model_copy(update=updates)
+    updates["market_data"] = settings.market_data.model_copy(
         update={
-            "market_data": settings.market_data.model_copy(
-                update={
-                    "symbols": (args.symbol.upper(),),
-                    "live_enabled": True,
-                },
-            ),
+            "symbols": (args.symbol.upper(),),
+            "live_enabled": True,
         },
+    )
+    return settings.model_copy(
+        update=updates,
     )
 
 
@@ -127,6 +138,7 @@ def historical_config_from_args(args: argparse.Namespace) -> HistoricalRuntimeCo
         ),
         data_root=Path(args.data_root),
         download=args.download,
+        integrity_policy=HistoricalIntegrityPolicy(args.historical_integrity_policy),
     )
 
 
@@ -141,7 +153,8 @@ def print_historical_preflight(args: argparse.Namespace) -> None:
     print(
         "Historical preflight: "
         f"symbol={args.symbol.upper()} start={args.start} end={args.end} "
-        f"expected_1m_candles={expected_one_minute_candles}",
+        f"expected_1m_candles={expected_one_minute_candles} "
+        f"integrity_policy={args.historical_integrity_policy}",
     )
     if end_time_ms - start_time_ms < DAILY_MS:
         print("Historical preflight warning: range is shorter than 1d; daily/weekly analysis will be unavailable.")

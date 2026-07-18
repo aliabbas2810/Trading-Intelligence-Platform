@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from backend.exchange.models import HistoricalIntegrityReport
 from backend.models import Timeframe
 
 
@@ -10,6 +11,7 @@ class AnalysisReadinessState(str, Enum):
     """Overall data-readiness state for M28.1 historical warm-up diagnostics."""
 
     READY = "READY"
+    DEGRADED = "DEGRADED"
     WARMING_UP = "WARMING_UP"
     INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
 
@@ -59,3 +61,4 @@ class AnalysisReadiness:
     overall_state: AnalysisReadinessState
     reason: str
     missing_reasons: tuple[str, ...]
+    historical_integrity: HistoricalIntegrityReport | None = None

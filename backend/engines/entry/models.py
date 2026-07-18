@@ -49,6 +49,7 @@ class DecisionEvidenceCode(str, Enum):
     AOI_LOCATION_NOT_ELIGIBLE = "aoi_location_not_eligible"
     AOI_MOVED_AWAY = "aoi_moved_away"
     AOI_DATA_MISSING = "aoi_data_missing"
+    NO_ACTIVE_AOI = "no_active_aoi"
 
 
 class DecisionEvidenceCategory(str, Enum):

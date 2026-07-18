@@ -35,6 +35,9 @@ logging:
 demo:
   enabled: true
 
+historical_data:
+  integrity_policy: strict
+
 market_data_sync:
   enabled: false
   startup_enabled: false

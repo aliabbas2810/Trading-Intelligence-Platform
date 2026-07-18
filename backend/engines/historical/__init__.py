@@ -1,5 +1,6 @@
 from backend.engines.historical.loader import (
     BitMartHistoricalCandleDownloader,
+    HistoricalCandleLoadResult,
     HistoricalCandleFileStore,
     HistoricalCandleLoader,
     HistoricalCandleRequest,
@@ -7,6 +8,7 @@ from backend.engines.historical.loader import (
 
 __all__ = [
     "BitMartHistoricalCandleDownloader",
+    "HistoricalCandleLoadResult",
     "HistoricalCandleFileStore",
     "HistoricalCandleLoader",
     "HistoricalCandleRequest",

@@ -34,6 +34,14 @@ class InMemoryCandleStore:
             raise CandleAlreadyExistsError("Candle already exists")
         self._candles[key] = candle
 
+    def save_many(self, candles: tuple[Candle, ...]) -> None:
+        for candle in candles:
+            key = self._key(candle)
+            if key in self._candles:
+                raise CandleAlreadyExistsError("Candle already exists")
+        for candle in candles:
+            self._candles[self._key(candle)] = candle
+
     def list(self, symbol: str, timeframe: Timeframe) -> tuple[Candle, ...]:
         candles = (
             candle

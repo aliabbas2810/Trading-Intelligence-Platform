@@ -16,6 +16,24 @@ class MarketType(str, Enum):
     USDT_M_PERPETUAL = "usdt_m_perpetual"
 
 
+class HistoricalIntegrityPolicy(str, Enum):
+    STRICT = "strict"
+    WARN = "warn"
+    ALLOW = "allow"
+
+
+class HistoricalIntegrityStatus(str, Enum):
+    VALID = "valid"
+    DEGRADED = "degraded"
+    INCOMPLETE = "incomplete"
+    FAILED = "failed"
+
+
+class HistoricalGapRecoveryStatus(str, Enum):
+    RECOVERED = "recovered"
+    UNRECOVERABLE = "unrecoverable"
+
+
 class ContractStatus(str, Enum):
     TRADING = "trading"
     PAUSED = "paused"
@@ -61,6 +79,7 @@ class ExchangeHistoricalCandleRequest:
     start_time_ms: int
     end_time_ms: int
     limit: int = 500
+    integrity_policy: HistoricalIntegrityPolicy = HistoricalIntegrityPolicy.STRICT
 
     def __post_init__(self) -> None:
         if not self.symbol:
@@ -84,6 +103,91 @@ class HistoricalCandleResult:
     candles: tuple[Candle, ...]
     pages: int
     latest_completed_time_ms: int
+    integrity_report: HistoricalIntegrityReport | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalDataGap:
+    symbol: str
+    timeframe: Timeframe
+    start_open_time_ms: int
+    end_open_time_ms: int
+    missing_candle_count: int
+    missing_open_times_ms: tuple[int, ...]
+    retry_count: int
+    exchange: ExchangeName
+    recovery_status: HistoricalGapRecoveryStatus
+    detected_at_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalIntegrityReport:
+    policy: HistoricalIntegrityPolicy
+    status: HistoricalIntegrityStatus
+    gap_count: int
+    total_missing_candles: int
+    gaps: tuple[HistoricalDataGap, ...]
+    requested_candle_count: int
+    loaded_candle_count: int
+    complete: bool
+    exchange: ExchangeName
+    market_type: MarketType
+    symbol: str
+    timeframe: Timeframe
+    start_time_ms: int
+    end_time_ms: int
+
+    @classmethod
+    def valid(
+        cls,
+        request: ExchangeHistoricalCandleRequest,
+        *,
+        requested_candle_count: int,
+        loaded_candle_count: int,
+    ) -> HistoricalIntegrityReport:
+        return cls(
+            policy=request.integrity_policy,
+            status=HistoricalIntegrityStatus.VALID,
+            gap_count=0,
+            total_missing_candles=0,
+            gaps=(),
+            requested_candle_count=requested_candle_count,
+            loaded_candle_count=loaded_candle_count,
+            complete=True,
+            exchange=request.exchange,
+            market_type=request.market_type,
+            symbol=request.symbol,
+            timeframe=request.timeframe,
+            start_time_ms=request.start_time_ms,
+            end_time_ms=request.end_time_ms,
+        )
+
+    @classmethod
+    def from_gaps(
+        cls,
+        request: ExchangeHistoricalCandleRequest,
+        *,
+        status: HistoricalIntegrityStatus,
+        gaps: tuple[HistoricalDataGap, ...],
+        requested_candle_count: int,
+        loaded_candle_count: int,
+    ) -> HistoricalIntegrityReport:
+        return cls(
+            policy=request.integrity_policy,
+            status=status,
+            gap_count=len(gaps),
+            total_missing_candles=sum(gap.missing_candle_count for gap in gaps),
+            gaps=gaps,
+            requested_candle_count=requested_candle_count,
+            loaded_candle_count=loaded_candle_count,
+            complete=False,
+            exchange=request.exchange,
+            market_type=request.market_type,
+            symbol=request.symbol,
+            timeframe=request.timeframe,
+            start_time_ms=request.start_time_ms,
+            end_time_ms=request.end_time_ms,
+        )
 
 
 @dataclass(frozen=True, slots=True)

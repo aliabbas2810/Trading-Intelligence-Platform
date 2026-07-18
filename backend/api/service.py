@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.ai import AiDecisionRequest, AiDecisionResponse
 from backend.api.aoi import (
+    AoiDiagnosticsResponse,
     AoiEvaluateRequest,
     AoiGateResponse,
     AoiLocationRequest,
@@ -198,6 +199,7 @@ def create_app(runtime: BackendRuntime | None = None) -> FastAPI:
             areas = tuple(area for area in areas if area.state.value in {"active", "broken", "retest_pending"})
         overlaps = runtime.list_aoi_overlaps(symbol=symbol, confluence_weight=1.0)
         gate = runtime.evaluate_aoi_gate(symbol=symbol)
+        diagnostics = runtime.aoi_diagnostics(symbol=symbol, timeframe=timeframe)
         return AoiReadResponse(
             symbol=symbol,
             aois=tuple(AoiResponse.from_area(area) for area in areas),
@@ -205,6 +207,21 @@ def create_app(runtime: BackendRuntime | None = None) -> FastAPI:
             location_gate=AoiGateResponse.from_gate(gate),
             location_gate_eligible=gate.eligible,
             reason_codes=gate.reason_codes,
+            diagnostics=tuple(
+                AoiDiagnosticsResponse(
+                    timeframe=item.timeframe.value,
+                    evaluated=item.evaluated,
+                    reason_code=item.reason_code,
+                    candle_count=item.candle_count,
+                    swing_count=item.swing_count,
+                    trend_available=item.trend_available,
+                    candidate_count=item.candidate_count,
+                    active_count=item.active_count,
+                    broken_count=item.broken_count,
+                    archived_count=item.archived_count,
+                )
+                for item in diagnostics
+            ),
         )
 
     @app.get("/api/aoi-overlaps")

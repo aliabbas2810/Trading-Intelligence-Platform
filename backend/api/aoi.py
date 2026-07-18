@@ -183,6 +183,19 @@ class AoiGateResponse(BaseModel):
         )
 
 
+class AoiDiagnosticsResponse(BaseModel):
+    timeframe: str
+    evaluated: bool
+    reason_code: str
+    candle_count: int
+    swing_count: int
+    trend_available: bool
+    candidate_count: int
+    active_count: int
+    broken_count: int
+    archived_count: int
+
+
 class AoiReadResponse(BaseModel):
     symbol: str
     aois: tuple[AoiResponse, ...]
@@ -190,3 +203,4 @@ class AoiReadResponse(BaseModel):
     location_gate: AoiGateResponse
     location_gate_eligible: bool
     reason_codes: tuple[str, ...]
+    diagnostics: tuple[AoiDiagnosticsResponse, ...] = ()

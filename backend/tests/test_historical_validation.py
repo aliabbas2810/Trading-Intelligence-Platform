@@ -14,8 +14,16 @@ from backend.exchange import (
     BitMartFuturesMarketDataAdapter,
     ExchangeHistoricalCandleRequest,
     HistoricalCandleResult,
+    HistoricalDataGap,
+    HistoricalGapRecoveryStatus,
+    HistoricalIntegrityPolicy,
+    HistoricalIntegrityReport,
+    HistoricalIntegrityStatus,
+    ExchangeName,
+    MarketType,
 )
 from backend.engines.historical.validation import HistoricalValidationRunner
+from backend.engines.historical.loader import HistoricalCandleLoadResult
 from backend.models import Candle, Timeframe
 from scripts.validate_historical import main
 
@@ -55,6 +63,52 @@ def test_historical_file_store_sorts_deduplicates_and_rejects_empty_cache(tmp_pa
     with pytest.raises(ValueError, match="Refusing to create empty"):
         store.save(empty_request, ())
     assert not empty_path.exists()
+
+
+def test_historical_file_store_writes_and_restores_integrity_metadata(tmp_path: Path) -> None:
+    request = make_request()
+    store = HistoricalCandleFileStore(tmp_path)
+    candles = make_fixture_candles(count=3)
+    report = incomplete_report(request, loaded_candle_count=3)
+
+    data_path = store.save_result(
+        request,
+        HistoricalCandleLoadResult(candles=candles, integrity_report=report),
+    )
+    loaded = store.load_result(request, integrity_policy=HistoricalIntegrityPolicy.WARN)
+
+    assert data_path.exists()
+    assert store.integrity_path_for(request).exists()
+    assert loaded.candles == candles
+    assert loaded.integrity_report == report
+
+
+def test_historical_file_store_strict_rejects_incomplete_cache(tmp_path: Path) -> None:
+    request = make_request()
+    store = HistoricalCandleFileStore(tmp_path)
+    store.save_result(
+        request,
+        HistoricalCandleLoadResult(
+            candles=make_fixture_candles(count=3),
+            integrity_report=incomplete_report(request, loaded_candle_count=3),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="Strict historical load rejected incomplete cache"):
+        store.load_result(request, integrity_policy=HistoricalIntegrityPolicy.STRICT)
+
+
+def test_historical_file_store_complete_cache_has_valid_integrity_metadata(tmp_path: Path) -> None:
+    request = make_request()
+    store = HistoricalCandleFileStore(tmp_path)
+    store.save(request, make_fixture_candles(count=4))
+
+    loaded = store.load_result(request, integrity_policy=HistoricalIntegrityPolicy.STRICT)
+
+    assert loaded.integrity_report.complete is True
+    assert loaded.integrity_report.status is HistoricalIntegrityStatus.VALID
+    assert loaded.integrity_report.requested_candle_count == 4
+    assert loaded.integrity_report.loaded_candle_count == 4
 
 
 def test_bitmart_kline_row_normalizes_to_canonical_candle() -> None:
@@ -217,6 +271,36 @@ def make_fixture_candles(*, count: int) -> tuple[Candle, ...]:
             ),
         )
     return tuple(candles)
+
+
+def incomplete_report(request: HistoricalCandleRequest, *, loaded_candle_count: int) -> HistoricalIntegrityReport:
+    gap = HistoricalDataGap(
+        symbol=request.symbol,
+        timeframe=request.timeframe,
+        start_open_time_ms=180_000,
+        end_open_time_ms=240_000,
+        missing_candle_count=1,
+        missing_open_times_ms=(180_000,),
+        retry_count=3,
+        exchange=ExchangeName.BITMART,
+        recovery_status=HistoricalGapRecoveryStatus.UNRECOVERABLE,
+        detected_at_ms=300_000,
+    )
+    return HistoricalIntegrityReport.from_gaps(
+        ExchangeHistoricalCandleRequest(
+            exchange=ExchangeName.BITMART,
+            market_type=MarketType.USDT_M_PERPETUAL,
+            symbol=request.symbol,
+            timeframe=request.timeframe,
+            start_time_ms=request.start_time_ms,
+            end_time_ms=request.end_time_ms,
+            integrity_policy=HistoricalIntegrityPolicy.WARN,
+        ),
+        status=HistoricalIntegrityStatus.DEGRADED,
+        gaps=(gap,),
+        requested_candle_count=4,
+        loaded_candle_count=loaded_candle_count,
+    )
 
 
 class EmptyBitMartAdapter(BitMartFuturesMarketDataAdapter):

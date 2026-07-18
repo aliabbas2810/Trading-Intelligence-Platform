@@ -304,6 +304,7 @@ class SetupScoringEngine:
                     DecisionEvidenceCode.AOI_LOCATION_NOT_ELIGIBLE,
                     DecisionEvidenceCode.AOI_MOVED_AWAY,
                     DecisionEvidenceCode.AOI_DATA_MISSING,
+                    DecisionEvidenceCode.NO_ACTIVE_AOI,
                 },
             ),
         )

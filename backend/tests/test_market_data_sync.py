@@ -15,11 +15,14 @@ from backend.exchange import (
     ContractStatus,
     ExchangeHistoricalCandleRequest,
     ExchangeName,
+    HistoricalIntegrityPolicy,
+    HistoricalIntegrityStatus,
     HistoricalCandleResult,
     MarketType,
     RateLimitMetadata,
     RetryPolicy,
 )
+from backend.exchange.bitmart import HistoricalDataGapError
 from backend.models import Candle, Timeframe
 from backend.storage import InMemoryCandleHistoryStore, JsonlCandleHistoryStore
 from backend.sync import (
@@ -98,6 +101,11 @@ class EmptyKlineTransport(FakeTransport):
 
 
 class GapKlineTransport(FakeTransport):
+    def __init__(self, *, gap_start_ms: int = 60_000, gap_end_ms: int = 120_000) -> None:
+        super().__init__()
+        self.gap_start_s = gap_start_ms // 1000
+        self.gap_end_s = gap_end_ms // 1000
+
     def get_json(self, path: str, params: dict[str, str | int]) -> object:
         payload = super().get_json(path, params)
         if path.endswith("/details"):
@@ -106,8 +114,41 @@ class GapKlineTransport(FakeTransport):
             data = payload.get("data")
             if isinstance(data, dict):
                 rows = data.get("klines")
-                if isinstance(rows, list) and len(rows) > 2:
-                    del rows[1]
+                if isinstance(rows, list):
+                    data["klines"] = [
+                        row
+                        for row in rows
+                        if not (
+                            isinstance(row, dict)
+                            and self.gap_start_s <= int(str(row.get("timestamp", -1))) < self.gap_end_s
+                        )
+                    ]
+        return payload
+
+
+class RecoverableGapKlineTransport(GapKlineTransport):
+    def get_json(self, path: str, params: dict[str, str | int]) -> object:
+        if not path.endswith("/details"):
+            start = int(params["start_time"])
+            end = int(params["end_time"])
+            if start == self.gap_start_s and end == self.gap_end_s:
+                return FakeTransport.get_json(self, path, params)
+        return super().get_json(path, params)
+
+
+class DuplicateRecoveryGapKlineTransport(RecoverableGapKlineTransport):
+    def get_json(self, path: str, params: dict[str, str | int]) -> object:
+        payload = super().get_json(path, params)
+        if path.endswith("/details"):
+            return payload
+        start = int(params["start_time"])
+        end = int(params["end_time"])
+        if start == self.gap_start_s and end == self.gap_end_s and isinstance(payload, dict):
+            data = payload.get("data")
+            if isinstance(data, dict):
+                rows = data.get("klines")
+                if isinstance(rows, list):
+                    data["klines"] = [*reversed(rows), *rows]
         return payload
 
 
@@ -216,6 +257,28 @@ def test_bitmart_long_historical_range_windows_by_limit_without_gaps() -> None:
     assert len({candle.open_time_ms for candle in result.candles}) == expected_count
 
 
+def test_bitmart_six_month_historical_range_windows_without_gaps() -> None:
+    transport = FakeTransport()
+    expected_count = 264_960
+    adapter = BitMartFuturesMarketDataAdapter(
+        transport=transport,
+        page_size=500,
+        clock_ms=lambda: (expected_count + 1) * 60_000,
+    )
+    request = historical_request(start=0, end=expected_count * 60_000, limit=500)
+
+    result = adapter.fetch_historical_candles(request)
+
+    kline_calls = kline_calls_from(transport)
+    assert len(kline_calls) == 530
+    assert result.pages == 530
+    assert len(result.candles) == expected_count
+    assert result.candles[0].open_time_ms == 0
+    assert result.candles[-1].open_time_ms == (expected_count - 1) * 60_000
+    assert kline_calls[-1]["end_time"] == expected_count * 60
+    assert len({candle.open_time_ms for candle in result.candles}) == expected_count
+
+
 def test_bitmart_final_partial_page_continues_to_requested_end() -> None:
     transport = FakeTransport()
     expected_count = 1_001
@@ -253,16 +316,135 @@ def test_bitmart_pagination_is_timeframe_aware_for_five_minute_candles() -> None
     assert result.candles[-1].open_time_ms == 20 * 60_000
 
 
-def test_bitmart_pagination_rejects_non_contiguous_page_data() -> None:
+def test_bitmart_recovers_narrow_missing_interval_without_synthesizing_candles() -> None:
+    transport = RecoverableGapKlineTransport(gap_start_ms=5 * 60_000, gap_end_ms=10 * 60_000)
     adapter = BitMartFuturesMarketDataAdapter(
-        transport=GapKlineTransport(),
+        transport=transport,
         page_size=500,
-        clock_ms=lambda: 10 * 60_000,
+        clock_ms=lambda: 30 * 60_000,
     )
-    request = historical_request(start=0, end=5 * 60_000, limit=500)
+    request = historical_request(start=0, end=20 * 60_000, limit=500)
 
-    with pytest.raises(RuntimeError, match="not contiguous"):
+    result = adapter.fetch_historical_candles(request)
+
+    kline_calls = kline_calls_from(transport)
+    assert len(result.candles) == 20
+    assert result.pages == 2
+    assert [candle.open_time_ms for candle in result.candles] == list(range(0, 20 * 60_000, 60_000))
+    assert any(call["start_time"] == 5 * 60 and call["end_time"] == 10 * 60 for call in kline_calls)
+
+
+def test_bitmart_recovery_deduplicates_and_sorts_retry_rows() -> None:
+    transport = DuplicateRecoveryGapKlineTransport(gap_start_ms=5 * 60_000, gap_end_ms=10 * 60_000)
+    adapter = BitMartFuturesMarketDataAdapter(
+        transport=transport,
+        page_size=500,
+        clock_ms=lambda: 30 * 60_000,
+    )
+    request = historical_request(start=0, end=20 * 60_000, limit=500)
+
+    result = adapter.fetch_historical_candles(request)
+
+    assert len(result.candles) == 20
+    assert [candle.open_time_ms for candle in result.candles] == list(range(0, 20 * 60_000, 60_000))
+
+
+def test_bitmart_rejects_persistent_non_contiguous_data_after_bounded_recovery() -> None:
+    transport = GapKlineTransport(gap_start_ms=5 * 60_000, gap_end_ms=10 * 60_000)
+    sleeps: list[float] = []
+    adapter = BitMartFuturesMarketDataAdapter(
+        transport=transport,
+        page_size=500,
+        clock_ms=lambda: 30 * 60_000,
+        sleeper=sleeps.append,
+        max_gap_recovery_attempts=2,
+        gap_recovery_backoff_seconds=0.1,
+    )
+    request = historical_request(start=0, end=20 * 60_000, limit=500)
+
+    with pytest.raises(HistoricalDataGapError) as exc_info:
         adapter.fetch_historical_candles(request)
+
+    message = str(exc_info.value)
+    assert "missing_start_time_ms=300000" in message
+    assert "missing_end_time_ms=600000" in message
+    assert "retry_count=2" in message
+    assert sleeps == [0.1]
+    kline_calls = kline_calls_from(transport)
+    assert sum(1 for call in kline_calls if call["start_time"] == 5 * 60 and call["end_time"] == 10 * 60) == 2
+
+
+def test_bitmart_warn_policy_returns_available_candles_and_degraded_report() -> None:
+    transport = GapKlineTransport(gap_start_ms=5 * 60_000, gap_end_ms=10 * 60_000)
+    adapter = BitMartFuturesMarketDataAdapter(
+        transport=transport,
+        page_size=500,
+        clock_ms=lambda: 30 * 60_000,
+        max_gap_recovery_attempts=2,
+        gap_recovery_backoff_seconds=0.0,
+    )
+    request = historical_request(
+        start=0,
+        end=20 * 60_000,
+        limit=500,
+        integrity_policy=HistoricalIntegrityPolicy.WARN,
+    )
+
+    result = adapter.fetch_historical_candles(request)
+
+    assert len(result.candles) == 15
+    assert {candle.open_time_ms for candle in result.candles}.isdisjoint(set(range(5 * 60_000, 10 * 60_000, 60_000)))
+    assert result.integrity_report is not None
+    assert result.integrity_report.status is HistoricalIntegrityStatus.DEGRADED
+    assert result.integrity_report.complete is False
+    assert result.integrity_report.requested_candle_count == 20
+    assert result.integrity_report.loaded_candle_count == 15
+    assert result.integrity_report.total_missing_candles == 5
+    assert result.integrity_report.gaps[0].missing_open_times_ms == tuple(range(5 * 60_000, 10 * 60_000, 60_000))
+
+
+def test_bitmart_allow_policy_returns_available_candles_and_incomplete_report() -> None:
+    adapter = BitMartFuturesMarketDataAdapter(
+        transport=GapKlineTransport(gap_start_ms=5 * 60_000, gap_end_ms=10 * 60_000),
+        page_size=500,
+        clock_ms=lambda: 30 * 60_000,
+        max_gap_recovery_attempts=1,
+        gap_recovery_backoff_seconds=0.0,
+    )
+    request = historical_request(
+        start=0,
+        end=20 * 60_000,
+        limit=500,
+        integrity_policy=HistoricalIntegrityPolicy.ALLOW,
+    )
+
+    result = adapter.fetch_historical_candles(request)
+
+    assert len(result.candles) == 15
+    assert result.integrity_report is not None
+    assert result.integrity_report.status is HistoricalIntegrityStatus.INCOMPLETE
+    assert result.integrity_report.gap_count == 1
+
+
+def test_bitmart_complete_data_has_valid_integrity_report_for_warn_policy() -> None:
+    adapter = BitMartFuturesMarketDataAdapter(
+        transport=FakeTransport(),
+        page_size=500,
+        clock_ms=lambda: 30 * 60_000,
+    )
+    request = historical_request(
+        start=0,
+        end=20 * 60_000,
+        limit=500,
+        integrity_policy=HistoricalIntegrityPolicy.WARN,
+    )
+
+    result = adapter.fetch_historical_candles(request)
+
+    assert result.integrity_report is not None
+    assert result.integrity_report.status is HistoricalIntegrityStatus.VALID
+    assert result.integrity_report.complete is True
+    assert result.integrity_report.gap_count == 0
 
 
 def test_bitmart_empty_historical_page_reports_exact_window() -> None:
@@ -559,6 +741,7 @@ def historical_request(
     end: int,
     timeframe: Timeframe = Timeframe.ONE_MINUTE,
     limit: int = 500,
+    integrity_policy: HistoricalIntegrityPolicy = HistoricalIntegrityPolicy.STRICT,
 ) -> ExchangeHistoricalCandleRequest:
     return ExchangeHistoricalCandleRequest(
         exchange=ExchangeName.BITMART,
@@ -568,6 +751,7 @@ def historical_request(
         start_time_ms=start,
         end_time_ms=end,
         limit=limit,
+        integrity_policy=integrity_policy,
     )
 
 

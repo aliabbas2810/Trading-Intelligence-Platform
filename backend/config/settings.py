@@ -80,6 +80,12 @@ class MarketDataSyncSettings(BaseModel):
     scanner_ready_only: bool = True
 
 
+class HistoricalDataSettings(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    integrity_policy: Literal["strict", "warn", "allow"] = "strict"
+
+
 class PlatformSettings(BaseModel):
     """Typed configuration contract for CFG-001."""
 
@@ -91,6 +97,7 @@ class PlatformSettings(BaseModel):
     storage: StorageSettings
     logging: LoggingSettings
     demo: DemoSettings = Field(default_factory=DemoSettings)
+    historical_data: HistoricalDataSettings = Field(default_factory=HistoricalDataSettings)
     market_data_sync: MarketDataSyncSettings = Field(default_factory=MarketDataSyncSettings)
 
 

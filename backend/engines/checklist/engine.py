@@ -158,11 +158,13 @@ class ChecklistEngine:
 
         codes = {evidence.code for evidence in trace.evidence if evidence.category is DecisionEvidenceCategory.AOI}
         missing = DecisionEvidenceCode.AOI_DATA_MISSING in codes
+        no_active = DecisionEvidenceCode.NO_ACTIVE_AOI in codes
         location_failed = bool(
             codes.intersection(
                 {
                     DecisionEvidenceCode.AOI_LOCATION_NOT_ELIGIBLE,
                     DecisionEvidenceCode.AOI_MOVED_AWAY,
+                    DecisionEvidenceCode.NO_ACTIVE_AOI,
                 },
             ),
         )
@@ -235,6 +237,8 @@ class ChecklistEngine:
                     if location_passed
                     else "aoi_data_missing"
                     if missing
+                    else "no_active_aoi"
+                    if no_active
                     else "aoi_location_not_eligible"
                     if location_failed
                     else "aoi_location_gate_unconfirmed"
@@ -248,6 +252,7 @@ class ChecklistEngine:
                         DecisionEvidenceCode.AOI_LOCATION_NOT_ELIGIBLE,
                         DecisionEvidenceCode.AOI_MOVED_AWAY,
                         DecisionEvidenceCode.AOI_DATA_MISSING,
+                        DecisionEvidenceCode.NO_ACTIVE_AOI,
                     )
                     if code in codes
                 ),
@@ -339,7 +344,7 @@ class ChecklistEngine:
     def _data_quality_items(self, checklist_input: ChecklistInput) -> tuple[ChecklistItem, ...]:
         if not checklist_input.runtime_metadata:
             return ()
-        return (
+        items = [
             self._item(
                 item_id="runtime.metadata",
                 category=ChecklistCategory.DATA_QUALITY,
@@ -350,7 +355,35 @@ class ChecklistEngine:
                 severity="info",
                 metadata=dict(checklist_input.runtime_metadata),
             ),
-        )
+        ]
+        integrity_status = checklist_input.runtime_metadata.get("historical_integrity_status")
+        integrity_complete = checklist_input.runtime_metadata.get("historical_integrity_complete")
+        if isinstance(integrity_status, str):
+            complete = bool(integrity_complete)
+            status = (
+                ChecklistItemStatus.PASS
+                if complete and integrity_status == "valid"
+                else ChecklistItemStatus.WARNING
+                if integrity_status == "degraded"
+                else ChecklistItemStatus.MISSING
+            )
+            items.append(
+                self._item(
+                    item_id="data_quality.historical_integrity",
+                    category=ChecklistCategory.DATA_QUALITY,
+                    status=status,
+                    label="Historical data integrity",
+                    description=f"historical_integrity_{integrity_status}",
+                    evidence_codes=("historical_data_gap",) if not complete else (),
+                    severity="info" if status is ChecklistItemStatus.PASS else "warning",
+                    metadata={
+                        "historical_integrity_status": integrity_status,
+                        "historical_integrity_complete": complete,
+                        "historical_gap_count": checklist_input.runtime_metadata.get("historical_gap_count"),
+                    },
+                ),
+            )
+        return tuple(items)
 
     def _entry_category(self, evidence: DecisionEvidence) -> ChecklistCategory:
         if evidence.category is DecisionEvidenceCategory.ALIGNMENT or evidence.category is DecisionEvidenceCategory.TREND:
