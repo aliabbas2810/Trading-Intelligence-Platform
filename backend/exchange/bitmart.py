@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import sleep, time
 from typing import Callable, Protocol, cast
 from urllib.error import HTTPError
-from urllib.parse import urlencode
+from urllib.parse import urlparse, urlencode
 from urllib.request import Request, urlopen
 
 from backend.exchange.models import (
@@ -32,6 +33,7 @@ from backend.pipelines.timeframe.aggregation import timeframe_duration_ms
 BITMART_FUTURES_BASE_URL = "https://api-cloud-v2.bitmart.com"
 ONE_MINUTE_MS = 60_000
 LOGGER = logging.getLogger(__name__)
+LATEST_AVAILABLE_PROBE_CANDLE_COUNT = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +45,13 @@ class MissingCandleInterval:
     @property
     def timestamps_ms(self) -> tuple[int, ...]:
         return tuple(range(self.start_time_ms, self.end_time_ms, self.duration_ms))
+
+
+@dataclass(frozen=True, slots=True)
+class SparseKlineNormalizationResult:
+    candles: tuple[Candle, ...]
+    exchange_candle_count: int
+    synthetic_candle_count: int
 
 
 class HistoricalDataGapError(RuntimeError):
@@ -91,6 +100,14 @@ class UrlLibJsonTransport:
         self._base_url = base_url.rstrip("/")
         self._timeout_seconds = timeout_seconds
 
+    @property
+    def base_url(self) -> str:
+        return self._base_url
+
+    @property
+    def timeout_seconds(self) -> float:
+        return self._timeout_seconds
+
     def get_json(self, path: str, params: dict[str, str | int]) -> object:
         query = urlencode(params)
         url = f"{self._base_url}{path}?{query}"
@@ -107,9 +124,44 @@ class UrlLibJsonTransport:
                 return json.loads(body)
         except HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
+            LOGGER.exception(
+                "BitMart HTTP request failed",
+                extra={
+                    "operation": "bitmart_historical_rest_request",
+                    "method": "GET",
+                    "endpoint_url": url,
+                    "base_url": self._base_url,
+                    "path": path,
+                    "parsed_hostname": urlparse(self._base_url).hostname,
+                    "symbol": params.get("symbol"),
+                    "request_start_time": params.get("start_time"),
+                    "request_end_time": params.get("end_time"),
+                    "timeout_seconds": self._timeout_seconds,
+                    "thread_name": threading.current_thread().name,
+                    "http_status": exc.code,
+                },
+            )
             raise RuntimeError(
                 f"BitMart HTTP request failed url={url} status={exc.code} body={truncate_text(body)}",
             ) from exc
+        except Exception:
+            LOGGER.exception(
+                "BitMart HTTP request raised",
+                extra={
+                    "operation": "bitmart_historical_rest_request",
+                    "method": "GET",
+                    "endpoint_url": url,
+                    "base_url": self._base_url,
+                    "path": path,
+                    "parsed_hostname": urlparse(self._base_url).hostname,
+                    "symbol": params.get("symbol"),
+                    "request_start_time": params.get("start_time"),
+                    "request_end_time": params.get("end_time"),
+                    "timeout_seconds": self._timeout_seconds,
+                    "thread_name": threading.current_thread().name,
+                },
+            )
+            raise
 
 
 class BitMartFuturesMarketDataAdapter:
@@ -134,6 +186,7 @@ class BitMartFuturesMarketDataAdapter:
         self._max_gap_recovery_attempts = max(1, max_gap_recovery_attempts)
         self._gap_recovery_backoff_seconds = max(0.0, gap_recovery_backoff_seconds)
         self._metadata: dict[str, ContractMetadata] = {}
+        self._active_latest_completed_time_ms: int | None = None
 
     def discover_contracts(self) -> tuple[ContractMetadata, ...]:
         payload = self._request("/contract/public/details", {})
@@ -162,76 +215,113 @@ class BitMartFuturesMarketDataAdapter:
         window_ms = duration_ms * min(request.limit, self._page_size)
         latest_completed = self.fetch_latest_completed_candle_time(request.symbol)
         end_time_ms = min(request.end_time_ms, latest_completed + duration_ms)
-        while cursor < end_time_ms:
-            page_end_time_ms = min(cursor + window_ms, end_time_ms)
-            page_request = ExchangeHistoricalCandleRequest(
-                exchange=request.exchange,
-                market_type=request.market_type,
-                symbol=request.symbol,
-                timeframe=request.timeframe,
-                start_time_ms=cursor,
-                end_time_ms=page_end_time_ms,
-                limit=request.limit,
-            )
-            page = self.fetch_historical_candle_page(page_request)
-            pages += 1
-            if not page.candles:
-                raise RuntimeError(
-                    "BitMart historical page returned zero candles "
-                    f"symbol={request.symbol} timeframe={request.timeframe.value} "
-                    f"page_start_time_ms={cursor} page_end_time_ms={page_end_time_ms} "
-                    f"limit={min(request.limit, self._page_size)} http_status=200",
+        previous_active_latest = self._active_latest_completed_time_ms
+        self._active_latest_completed_time_ms = latest_completed
+        try:
+            while cursor < end_time_ms:
+                page_end_time_ms = min(cursor + window_ms, end_time_ms)
+                page_request = ExchangeHistoricalCandleRequest(
+                    exchange=request.exchange,
+                    market_type=request.market_type,
+                    symbol=request.symbol,
+                    timeframe=request.timeframe,
+                    start_time_ms=cursor,
+                    end_time_ms=page_end_time_ms,
+                    limit=request.limit,
                 )
-            for candle in page.candles:
-                candles[candle.open_time_ms] = candle
-            next_cursor = page.next_start_time_ms
-            LOGGER.info(
-                "Fetched BitMart historical candle page "
-                "symbol=%s timeframe=%s page_start_time_ms=%s page_end_time_ms=%s "
-                "returned_candle_count=%s next_cursor_time_ms=%s total_accumulated_candle_count=%s",
-                request.symbol,
-                request.timeframe.value,
-                cursor,
-                page_end_time_ms,
-                len(page.candles),
-                next_cursor,
-                len(candles),
-                extra={
-                    "symbol": request.symbol,
-                    "timeframe": request.timeframe.value,
-                    "page_start_time_ms": cursor,
-                    "page_end_time_ms": page_end_time_ms,
-                    "limit": min(request.limit, self._page_size),
-                    "http_status": 200,
-                    "returned_candle_count": len(page.candles),
-                    "first_returned_open_time_ms": page.candles[0].open_time_ms,
-                    "first_returned_open_utc": format_utc_ms(page.candles[0].open_time_ms),
-                    "last_returned_open_time_ms": page.candles[-1].open_time_ms,
-                    "last_returned_open_utc": format_utc_ms(page.candles[-1].open_time_ms),
-                    "expected_next_time_ms": page_end_time_ms,
-                    "expected_next_utc": format_utc_ms(page_end_time_ms),
-                    "next_cursor_time_ms": next_cursor,
-                    "total_accumulated_candle_count": len(candles),
-                },
-            )
-            if next_cursor is None:
-                if page_end_time_ms < end_time_ms:
+                page = self.fetch_historical_candle_page(page_request)
+                pages += 1
+                if not page.candles:
+                    if self._is_freshest_tail_page(cursor, page_end_time_ms, end_time_ms, latest_completed, duration_ms):
+                        LOGGER.warning(
+                            "BitMart freshest historical tail is temporarily unavailable "
+                            "symbol=%s timeframe=%s page_start_time_ms=%s page_end_time_ms=%s "
+                            "latest_confirmed_open_time_ms=%s",
+                            request.symbol,
+                            request.timeframe.value,
+                            cursor,
+                            page_end_time_ms,
+                            latest_completed,
+                            extra={
+                                "symbol": request.symbol,
+                                "timeframe": request.timeframe.value,
+                                "page_start_time_ms": cursor,
+                                "page_end_time_ms": page_end_time_ms,
+                                "latest_confirmed_open_time_ms": latest_completed,
+                                "skipped_unavailable_tail_range": (cursor, page_end_time_ms),
+                            },
+                        )
+                        break
+                    page = self._normalize_empty_historical_page_if_confirmed(
+                        page_request,
+                        duration_ms=duration_ms,
+                        latest_completed_open_time_ms=latest_completed,
+                    )
+                    if not page.candles:
+                        raise RuntimeError(
+                            "BitMart historical page returned zero candles "
+                            f"symbol={request.symbol} timeframe={request.timeframe.value} "
+                            f"page_start_time_ms={cursor} page_end_time_ms={page_end_time_ms} "
+                            f"limit={min(request.limit, self._page_size)} http_status=200",
+                        )
+                for candle in page.candles:
+                    self._merge_candle_by_precedence(candles, candle)
+                next_cursor = page.next_start_time_ms
+                LOGGER.info(
+                    "Fetched BitMart historical candle page "
+                    "symbol=%s timeframe=%s page_start_time_ms=%s page_end_time_ms=%s "
+                    "returned_candle_count=%s next_cursor_time_ms=%s total_accumulated_candle_count=%s",
+                    request.symbol,
+                    request.timeframe.value,
+                    cursor,
+                    page_end_time_ms,
+                    len(page.candles),
+                    next_cursor,
+                    len(candles),
+                    extra={
+                        "symbol": request.symbol,
+                        "timeframe": request.timeframe.value,
+                        "page_start_time_ms": cursor,
+                        "page_end_time_ms": page_end_time_ms,
+                        "limit": min(request.limit, self._page_size),
+                        "http_status": 200,
+                        "returned_candle_count": len(page.candles),
+                        "first_returned_open_time_ms": page.candles[0].open_time_ms,
+                        "first_returned_open_utc": format_utc_ms(page.candles[0].open_time_ms),
+                        "last_returned_open_time_ms": page.candles[-1].open_time_ms,
+                        "last_returned_open_utc": format_utc_ms(page.candles[-1].open_time_ms),
+                        "expected_next_time_ms": page_end_time_ms,
+                        "expected_next_utc": format_utc_ms(page_end_time_ms),
+                        "next_cursor_time_ms": next_cursor,
+                        "total_accumulated_candle_count": len(candles),
+                    },
+                )
+                if next_cursor is None:
+                    if page_end_time_ms < end_time_ms:
+                        raise RuntimeError(
+                            "BitMart historical pagination stopped before requested range ended "
+                            f"symbol={request.symbol} timeframe={request.timeframe.value} "
+                            f"page_start_time_ms={cursor} page_end_time_ms={page_end_time_ms} "
+                            f"requested_end_time_ms={end_time_ms}",
+                        )
+                    break
+                if next_cursor <= cursor:
                     raise RuntimeError(
-                        "BitMart historical pagination stopped before requested range ended "
+                        "BitMart historical pagination cursor did not advance "
                         f"symbol={request.symbol} timeframe={request.timeframe.value} "
                         f"page_start_time_ms={cursor} page_end_time_ms={page_end_time_ms} "
-                        f"requested_end_time_ms={end_time_ms}",
+                        f"next_cursor_time_ms={next_cursor}",
                     )
-                break
-            if next_cursor <= cursor:
-                raise RuntimeError(
-                    "BitMart historical pagination cursor did not advance "
-                    f"symbol={request.symbol} timeframe={request.timeframe.value} "
-                    f"page_start_time_ms={cursor} page_end_time_ms={page_end_time_ms} "
-                    f"next_cursor_time_ms={next_cursor}",
-                )
-            cursor = next_cursor
-        sorted_candles = tuple(candles[key] for key in sorted(candles))
+                cursor = next_cursor
+        finally:
+            self._active_latest_completed_time_ms = previous_active_latest
+        normalization = self._normalize_sparse_klines(
+            tuple(candles[key] for key in sorted(candles)),
+            request,
+            end_time_ms,
+            duration_ms,
+        )
+        sorted_candles = normalization.candles
         sorted_candles, recovery_pages, unrecovered_gaps = self._recover_gaps_if_needed(
             sorted_candles,
             request,
@@ -240,6 +330,8 @@ class BitMartFuturesMarketDataAdapter:
             window_ms,
         )
         pages += recovery_pages
+        exchange_candle_count = sum(1 for candle in sorted_candles if candle.source_kind == "exchange")
+        synthetic_candle_count = sum(1 for candle in sorted_candles if candle.source_kind == "synthetic_no_trade")
         requested_candle_count = max(0, (end_time_ms - request.start_time_ms) // duration_ms)
         if not unrecovered_gaps:
             self._validate_contiguous_candles(sorted_candles, request, end_time_ms, duration_ms)
@@ -247,6 +339,9 @@ class BitMartFuturesMarketDataAdapter:
                 request,
                 requested_candle_count=requested_candle_count,
                 loaded_candle_count=len(sorted_candles),
+                exchange_candle_count=exchange_candle_count,
+                synthetic_candle_count=synthetic_candle_count,
+                canonical_candle_count=len(sorted_candles),
             )
         else:
             integrity_report = HistoricalIntegrityReport.from_gaps(
@@ -259,6 +354,9 @@ class BitMartFuturesMarketDataAdapter:
                 gaps=unrecovered_gaps,
                 requested_candle_count=requested_candle_count,
                 loaded_candle_count=len(sorted_candles),
+                exchange_candle_count=exchange_candle_count,
+                synthetic_candle_count=synthetic_candle_count,
+                canonical_candle_count=len(sorted_candles),
             )
             LOGGER.warning(
                 "Continuing with incomplete BitMart historical data "
@@ -287,6 +385,24 @@ class BitMartFuturesMarketDataAdapter:
     ) -> CandlePage:
         duration_ms = timeframe_duration_ms(request.timeframe)
         limit = min(request.limit, self._page_size)
+        latest_completed = self._active_latest_completed_time_ms
+        if latest_completed is None:
+            latest_completed = self.fetch_latest_completed_candle_time(request.symbol)
+        return self._fetch_historical_candle_page(
+            request,
+            duration_ms=duration_ms,
+            limit=limit,
+            latest_completed_open_time_ms=latest_completed,
+        )
+
+    def _fetch_historical_candle_page(
+        self,
+        request: ExchangeHistoricalCandleRequest,
+        *,
+        duration_ms: int,
+        limit: int,
+        latest_completed_open_time_ms: int,
+    ) -> CandlePage:
         path = "/contract/public/kline"
         params: dict[str, str | int] = {
             "symbol": self.exchange_symbol_for(request.symbol),
@@ -307,7 +423,7 @@ class BitMartFuturesMarketDataAdapter:
                             for row in rows
                         )
                         if request.start_time_ms <= candle.open_time_ms < request.end_time_ms
-                        and candle.open_time_ms <= self.fetch_latest_completed_candle_time(request.symbol)
+                        and candle.open_time_ms <= latest_completed_open_time_ms
                     ),
                     key=lambda item: item.open_time_ms,
                 ),
@@ -327,11 +443,262 @@ class BitMartFuturesMarketDataAdapter:
             complete=False,
         )
 
+    def _normalize_empty_historical_page_if_confirmed(
+        self,
+        request: ExchangeHistoricalCandleRequest,
+        *,
+        duration_ms: int,
+        latest_completed_open_time_ms: int,
+    ) -> CandlePage:
+        context_start_ms = max(0, request.start_time_ms - duration_ms)
+        context_end_ms = min(request.end_time_ms + duration_ms, latest_completed_open_time_ms + duration_ms)
+        if context_start_ms >= request.start_time_ms or context_end_ms <= request.end_time_ms:
+            return CandlePage(candles=(), next_start_time_ms=request.end_time_ms, complete=True)
+        context_request = ExchangeHistoricalCandleRequest(
+            exchange=request.exchange,
+            market_type=request.market_type,
+            symbol=request.symbol,
+            timeframe=request.timeframe,
+            start_time_ms=context_start_ms,
+            end_time_ms=context_end_ms,
+            limit=max(3, request.limit),
+            integrity_policy=request.integrity_policy,
+        )
+        context_page = self._fetch_historical_candle_page(
+            context_request,
+            duration_ms=duration_ms,
+            limit=max(3, min(request.limit, self._page_size)),
+            latest_completed_open_time_ms=latest_completed_open_time_ms,
+        )
+        context_by_open = {candle.open_time_ms: candle for candle in context_page.candles}
+        previous = context_by_open.get(request.start_time_ms - duration_ms)
+        later = next((candle for candle in context_page.candles if candle.open_time_ms >= request.end_time_ms), None)
+        if previous is None or later is None:
+            return CandlePage(candles=(), next_start_time_ms=request.end_time_ms, complete=True)
+        synthetic = self._synthetic_no_trade_candles(
+            symbol=request.symbol,
+            timeframe=request.timeframe,
+            start_time_ms=request.start_time_ms,
+            end_time_ms=request.end_time_ms,
+            duration_ms=duration_ms,
+            previous_close=previous.close,
+        )
+        LOGGER.info(
+            "Normalized BitMart sparse historical empty page as no-trade candles "
+            "symbol=%s timeframe=%s start_time_ms=%s end_time_ms=%s synthetic_count=%s",
+            request.symbol,
+            request.timeframe.value,
+            request.start_time_ms,
+            request.end_time_ms,
+            len(synthetic),
+            extra={
+                "symbol": request.symbol,
+                "timeframe": request.timeframe.value,
+                "start_time_ms": request.start_time_ms,
+                "end_time_ms": request.end_time_ms,
+                "synthetic_no_trade_candle_count": len(synthetic),
+                "context_start_time_ms": context_start_ms,
+                "context_end_time_ms": context_end_ms,
+            },
+        )
+        return CandlePage(candles=synthetic, next_start_time_ms=request.end_time_ms, complete=True)
+
+    def _normalize_sparse_klines(
+        self,
+        candles: tuple[Candle, ...],
+        request: ExchangeHistoricalCandleRequest,
+        end_time_ms: int,
+        duration_ms: int,
+    ) -> SparseKlineNormalizationResult:
+        if not candles:
+            return SparseKlineNormalizationResult(candles=(), exchange_candle_count=0, synthetic_candle_count=0)
+        normalized: dict[int, Candle] = {}
+        synthetic_count = 0
+        previous: Candle | None = None
+        for candle in sorted(candles, key=lambda item: item.open_time_ms):
+            if previous is not None and previous.close_time_ms < candle.open_time_ms:
+                synthetic = self._synthetic_no_trade_candles(
+                    symbol=request.symbol,
+                    timeframe=request.timeframe,
+                    start_time_ms=previous.close_time_ms,
+                    end_time_ms=candle.open_time_ms,
+                    duration_ms=duration_ms,
+                    previous_close=previous.close,
+                )
+                synthetic_count += len(synthetic)
+                for synthetic_candle in synthetic:
+                    self._merge_candle_by_precedence(normalized, synthetic_candle)
+            self._merge_candle_by_precedence(normalized, candle)
+            previous = candle
+        sorted_normalized = tuple(normalized[key] for key in sorted(normalized))
+        exchange_count = sum(1 for candle in sorted_normalized if candle.source_kind == "exchange")
+        if synthetic_count:
+            LOGGER.info(
+                "Normalized BitMart sparse historical klines "
+                "symbol=%s timeframe=%s synthetic_count=%s canonical_count=%s",
+                request.symbol,
+                request.timeframe.value,
+                synthetic_count,
+                len(sorted_normalized),
+                extra={
+                    "symbol": request.symbol,
+                    "timeframe": request.timeframe.value,
+                    "synthetic_no_trade_candle_count": synthetic_count,
+                    "canonical_candle_count": len(sorted_normalized),
+                    "request_start_time_ms": request.start_time_ms,
+                    "request_end_time_ms": end_time_ms,
+                },
+            )
+        return SparseKlineNormalizationResult(
+            candles=sorted_normalized,
+            exchange_candle_count=exchange_count,
+            synthetic_candle_count=synthetic_count,
+        )
+
+    def _synthetic_no_trade_candles(
+        self,
+        *,
+        symbol: str,
+        timeframe: Timeframe,
+        start_time_ms: int,
+        end_time_ms: int,
+        duration_ms: int,
+        previous_close: float,
+    ) -> tuple[Candle, ...]:
+        return tuple(
+            Candle(
+                symbol=symbol,
+                timeframe=timeframe,
+                open_time_ms=open_time_ms,
+                close_time_ms=open_time_ms + duration_ms,
+                open=previous_close,
+                high=previous_close,
+                low=previous_close,
+                close=previous_close,
+                volume=0.0,
+                source_kind="synthetic_no_trade",
+            )
+            for open_time_ms in range(start_time_ms, end_time_ms, duration_ms)
+        )
+
+    def _merge_candle_by_precedence(self, candles: dict[int, Candle], candle: Candle) -> None:
+        existing = candles.get(candle.open_time_ms)
+        if existing is None or (existing.source_kind == "synthetic_no_trade" and candle.source_kind == "exchange"):
+            candles[candle.open_time_ms] = candle
+
     def fetch_latest_completed_candle_time(self, _symbol: str) -> int:
+        theoretical_latest = self._theoretical_latest_completed_open_time_ms()
+        if theoretical_latest <= 0:
+            return 0
+        probe_start_ms = max(0, theoretical_latest - (LATEST_AVAILABLE_PROBE_CANDLE_COUNT - 1) * ONE_MINUTE_MS)
+        probe_request = ExchangeHistoricalCandleRequest(
+            exchange=ExchangeName.BITMART,
+            market_type=MarketType.USDT_M_PERPETUAL,
+            symbol=_symbol,
+            timeframe=Timeframe.ONE_MINUTE,
+            start_time_ms=probe_start_ms,
+            end_time_ms=theoretical_latest + ONE_MINUTE_MS,
+            limit=LATEST_AVAILABLE_PROBE_CANDLE_COUNT,
+        )
+        LOGGER.info(
+            "Starting BitMart latest historical candle availability probe",
+            extra={
+                "operation": "bitmart_latest_candle_probe",
+                "rest_base_url": self._transport_base_url(),
+                "parsed_hostname": self._transport_hostname(),
+                "symbol": _symbol,
+                "timeout_seconds": self._transport_timeout_seconds(),
+                "retry_attempt": 1,
+                "thread_name": threading.current_thread().name,
+            },
+        )
+        try:
+            page = self._fetch_historical_candle_page(
+                probe_request,
+                duration_ms=ONE_MINUTE_MS,
+                limit=LATEST_AVAILABLE_PROBE_CANDLE_COUNT,
+                latest_completed_open_time_ms=theoretical_latest,
+            )
+        except Exception as exc:
+            fallback = self._conservative_latest_completed_open_time_ms(theoretical_latest)
+            LOGGER.exception(
+                "BitMart latest historical candle probe failed; using conservative fallback "
+                "symbol=%s theoretical_latest_open_time_ms=%s fallback_open_time_ms=%s error=%s",
+                _symbol,
+                theoretical_latest,
+                fallback,
+                exc,
+                extra={
+                    "symbol": _symbol,
+                    "theoretical_latest_open_time_ms": theoretical_latest,
+                    "fallback_open_time_ms": fallback,
+                    "probe_error": str(exc),
+                    "operation": "bitmart_latest_candle_probe",
+                    "rest_base_url": self._transport_base_url(),
+                    "parsed_hostname": self._transport_hostname(),
+                    "timeout_seconds": self._transport_timeout_seconds(),
+                    "exception_type": type(exc).__name__,
+                    "thread_name": threading.current_thread().name,
+                },
+            )
+            return fallback
+        if not page.candles:
+            fallback = self._conservative_latest_completed_open_time_ms(theoretical_latest)
+            LOGGER.warning(
+                "BitMart latest historical candle probe returned no candles; using conservative fallback "
+                "symbol=%s theoretical_latest_open_time_ms=%s fallback_open_time_ms=%s",
+                _symbol,
+                theoretical_latest,
+                fallback,
+                extra={
+                    "symbol": _symbol,
+                    "theoretical_latest_open_time_ms": theoretical_latest,
+                    "fallback_open_time_ms": fallback,
+                    "probe_start_time_ms": probe_start_ms,
+                    "probe_end_time_ms": theoretical_latest + ONE_MINUTE_MS,
+                },
+            )
+            return fallback
+        latest_available = page.candles[-1].open_time_ms
+        LOGGER.info(
+            "Confirmed latest BitMart historical candle availability "
+            "symbol=%s theoretical_latest_open_time_ms=%s latest_available_open_time_ms=%s",
+            _symbol,
+            theoretical_latest,
+            latest_available,
+            extra={
+                "symbol": _symbol,
+                "theoretical_latest_open_time_ms": theoretical_latest,
+                "latest_available_open_time_ms": latest_available,
+                "probe_start_time_ms": probe_start_ms,
+                "probe_end_time_ms": theoretical_latest + ONE_MINUTE_MS,
+                "probe_returned_candle_count": len(page.candles),
+            },
+        )
+        return latest_available
+
+    def _theoretical_latest_completed_open_time_ms(self) -> int:
         now_ms = self._clock_ms()
         if now_ms <= 0:
             return 0
         return ((now_ms // ONE_MINUTE_MS) * ONE_MINUTE_MS) - ONE_MINUTE_MS
+
+    def _conservative_latest_completed_open_time_ms(self, theoretical_latest_open_time_ms: int) -> int:
+        return max(0, theoretical_latest_open_time_ms - ONE_MINUTE_MS)
+
+    def _is_freshest_tail_page(
+        self,
+        page_start_time_ms: int,
+        page_end_time_ms: int,
+        request_end_time_ms: int,
+        latest_completed_open_time_ms: int,
+        duration_ms: int,
+    ) -> bool:
+        return (
+            page_end_time_ms == request_end_time_ms
+            and request_end_time_ms == latest_completed_open_time_ms + duration_ms
+            and page_start_time_ms <= latest_completed_open_time_ms
+        )
 
     def normalize_symbol(self, exchange_symbol: str) -> str:
         return exchange_symbol.replace("_", "").replace("-", "").upper()
@@ -361,12 +728,43 @@ class BitMartFuturesMarketDataAdapter:
                 return self._transport.get_json(path, params)
             except Exception as exc:
                 last_error = exc
+                LOGGER.exception(
+                    "BitMart REST request attempt failed",
+                    extra={
+                        "operation": "bitmart_historical_rest_request",
+                        "method": "GET",
+                        "base_url": self._transport_base_url(),
+                        "path": path,
+                        "parsed_hostname": self._transport_hostname(),
+                        "symbol": params.get("symbol"),
+                        "request_start_time": params.get("start_time"),
+                        "request_end_time": params.get("end_time"),
+                        "attempt_number": attempt + 1,
+                        "max_attempts": attempts,
+                        "timeout_seconds": self._transport_timeout_seconds(),
+                        "thread_name": threading.current_thread().name,
+                        "exception_type": type(exc).__name__,
+                    },
+                )
                 if attempt < attempts - 1 and delay > 0:
                     self._sleeper(delay)
                     delay *= self._retry_policy.multiplier
         if last_error is not None:
             raise last_error
         raise RuntimeError("BitMart request failed without an exception")
+
+    def _transport_base_url(self) -> str:
+        return str(getattr(self._transport, "base_url", "unknown"))
+
+    def _transport_timeout_seconds(self) -> float | None:
+        value = getattr(self._transport, "timeout_seconds", None)
+        return float(value) if value is not None else None
+
+    def _transport_hostname(self) -> str | None:
+        base_url = self._transport_base_url()
+        if base_url == "unknown":
+            return None
+        return urlparse(base_url).hostname
 
     def _validate_contiguous_candles(
         self,

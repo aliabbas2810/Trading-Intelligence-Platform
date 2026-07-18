@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 
 from backend.exchange import (
     BitMartFuturesMarketDataAdapter,
@@ -26,6 +27,7 @@ from backend.pipelines.timeframe.aggregation import timeframe_duration_ms
 
 DEFAULT_HISTORICAL_DATA_ROOT = Path("data") / "historical"
 UTC_DAY_MS = 24 * 60 * 60 * 1000
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,7 +202,9 @@ class HistoricalCandleFileStore:
         """Persist candles into deterministic UTC-day JSONL segments for live/cache catch-up."""
 
         grouped: dict[tuple[str, Timeframe, int], list[Candle]] = {}
+        incoming_count = 0
         for candle in candles:
+            incoming_count += 1
             day_start_ms = floor_to_utc_day_ms(candle.open_time_ms)
             grouped.setdefault((candle.symbol, candle.timeframe, day_start_ms), []).append(candle)
 
@@ -221,6 +225,14 @@ class HistoricalCandleFileStore:
             merged = self._normalized_candles((*existing, *segment_candles))
             report = inferred_integrity_report(request, merged, integrity_policy=HistoricalIntegrityPolicy.WARN)
             paths.append(self.save_result(request, HistoricalCandleLoadResult(candles=merged, integrity_report=report)))
+        LOGGER.info(
+            "Historical daily persistence completed incoming_candle_count=%s changed_utc_day_count=%s "
+            "written_day_count=%s unchanged_day_count=%s",
+            incoming_count,
+            len(grouped),
+            len(paths),
+            0,
+        )
         return tuple(paths)
 
     def save_range_segment(
@@ -323,7 +335,11 @@ class HistoricalCandleFileStore:
         return tuple(sorted(removed))
 
     def _normalized_candles(self, candles: Iterable[Candle]) -> tuple[Candle, ...]:
-        candle_by_open_time = {candle.open_time_ms: candle for candle in candles}
+        candle_by_open_time: dict[int, Candle] = {}
+        for candle in candles:
+            existing = candle_by_open_time.get(candle.open_time_ms)
+            if existing is None or (existing.source_kind == "synthetic_no_trade" and candle.source_kind == "exchange"):
+                candle_by_open_time[candle.open_time_ms] = candle
         return tuple(candle_by_open_time[open_time] for open_time in sorted(candle_by_open_time))
 
     def _validate_report_identity(self, request: HistoricalCandleRequest, report: HistoricalIntegrityReport) -> None:
@@ -345,12 +361,17 @@ class HistoricalCandleFileStore:
         existing_by_open_time = {candle.open_time_ms: candle for candle in existing}
         for candle in incoming:
             existing_candle = existing_by_open_time.get(candle.open_time_ms)
-            if existing_candle is not None and existing_candle != candle:
-                raise ValueError(
-                    "Historical candle cache conflict "
-                    f"symbol={candle.symbol} timeframe={candle.timeframe.value} "
-                    f"open_time_ms={candle.open_time_ms}",
-                )
+            if existing_candle is None or existing_candle == candle:
+                continue
+            if existing_candle.source_kind == "synthetic_no_trade" and candle.source_kind == "exchange":
+                continue
+            if existing_candle.source_kind == "exchange" and candle.source_kind == "synthetic_no_trade":
+                continue
+            raise ValueError(
+                "Historical candle cache conflict "
+                f"symbol={candle.symbol} timeframe={candle.timeframe.value} "
+                f"open_time_ms={candle.open_time_ms}",
+            )
 
 
 class BitMartHistoricalCandleDownloader:
@@ -390,7 +411,11 @@ class BitMartHistoricalCandleDownloader:
             integrity_policy=integrity_policy,
         )
         result = self._adapter.fetch_historical_candles(exchange_request)
-        if not result.candles:
+        if not result.candles and (
+            integrity_policy is HistoricalIntegrityPolicy.STRICT
+            or result.integrity_report is None
+            or result.integrity_report.complete
+        ):
             exchange_symbol = self._adapter.exchange_symbol_for(request.symbol)
             raise RuntimeError(
                 "BitMart historical download returned zero candles "
@@ -431,6 +456,9 @@ def candle_from_bitmart_kline(
 
 
 def candle_from_payload(payload: dict[str, object]) -> Candle:
+    source_kind = read_str(payload.get("source_kind", "exchange"), "source_kind")
+    if source_kind not in {"exchange", "synthetic_no_trade"}:
+        raise ValueError("source_kind must be exchange or synthetic_no_trade")
     return Candle(
         symbol=read_str(payload.get("symbol"), "symbol"),
         timeframe=Timeframe(read_str(payload.get("timeframe"), "timeframe")),
@@ -441,6 +469,7 @@ def candle_from_payload(payload: dict[str, object]) -> Candle:
         low=read_float(payload.get("low"), "low"),
         close=read_float(payload.get("close"), "close"),
         volume=read_float(payload.get("volume"), "volume"),
+        source_kind=cast(Literal["exchange", "synthetic_no_trade"], source_kind),
     )
 
 
@@ -578,6 +607,9 @@ def integrity_report_to_payload(report: HistoricalIntegrityReport) -> dict[str, 
         ],
         "requested_candle_count": report.requested_candle_count,
         "loaded_candle_count": report.loaded_candle_count,
+        "exchange_candle_count": report.exchange_candle_count,
+        "synthetic_candle_count": report.synthetic_candle_count,
+        "canonical_candle_count": report.canonical_candle_count,
         "complete": report.complete,
         "exchange": report.exchange.value,
         "market_type": report.market_type.value,
@@ -626,6 +658,9 @@ def integrity_report_from_payload(payload: dict[str, object]) -> HistoricalInteg
         timeframe=Timeframe(read_str(payload.get("timeframe"), "timeframe")),
         start_time_ms=read_int(payload.get("start_time_ms"), "start_time_ms"),
         end_time_ms=read_int(payload.get("end_time_ms"), "end_time_ms"),
+        exchange_candle_count=read_int(payload.get("exchange_candle_count", payload.get("loaded_candle_count")), "exchange_candle_count"),
+        synthetic_candle_count=read_int(payload.get("synthetic_candle_count", 0), "synthetic_candle_count"),
+        canonical_candle_count=read_int(payload.get("canonical_candle_count", payload.get("loaded_candle_count")), "canonical_candle_count"),
     )
 
 

@@ -727,6 +727,40 @@ def test_live_startup_with_current_cache_does_not_request_rest_catchup(tmp_path:
     assert components["cache_candle_count"].message == "5"
 
 
+def test_live_warn_policy_continues_when_freshest_tail_is_temporarily_unavailable(tmp_path: Path) -> None:
+    cached_request = HistoricalCandleRequest(
+        symbol="BTCUSDT",
+        timeframe=Timeframe.ONE_MINUTE,
+        start_time_ms=0,
+        end_time_ms=300_000,
+    )
+    HistoricalCandleFileStore(tmp_path).save(cached_request, historical_fixture_candles(count=5))
+    downloader = UnavailableTailCatchupDownloader(latest_completed_open_time_ms=300_000)
+
+    runtime = BackendRuntime(
+        settings=live_enabled_settings(
+            data_root=tmp_path,
+            historical_integrity_policy=HistoricalIntegrityPolicy.WARN,
+        ),
+        mode=RuntimeMode.LIVE_BITMART,
+        live_stream_runner_factory=lambda client: RecordingLiveStreamRunner().bind(client),
+        historical_downloader=downloader,
+    )
+
+    runtime.start()
+    health = runtime.health()
+    components = {component.name: component for component in health.components}
+
+    assert health.state is RuntimeState.RUNNING
+    assert downloader.requests == [(300_000, 360_000)]
+    assert components["sync_loaded_count"].message == "0"
+    assert components["cache_candle_count"].message == "5"
+    assert health.complete_cache_integrity is not None
+    assert health.complete_cache_integrity.status is HistoricalIntegrityStatus.DEGRADED
+    assert health.replay_integrity is not None
+    assert health.replay_integrity.status is HistoricalIntegrityStatus.DEGRADED
+
+
 def test_live_startup_strict_mode_can_repair_incomplete_cached_segment(tmp_path: Path) -> None:
     cached_request = HistoricalCandleRequest(
         symbol="BTCUSDT",
@@ -1274,6 +1308,48 @@ class FailingLiveCatchupDownloader(FakeLiveCatchupDownloader):
         integrity_policy: HistoricalIntegrityPolicy,
     ) -> HistoricalCandleLoadResult:
         raise RuntimeError("simulated catch-up failure")
+
+
+class UnavailableTailCatchupDownloader(FakeLiveCatchupDownloader):
+    def load_result(
+        self,
+        request: HistoricalCandleRequest,
+        *,
+        integrity_policy: HistoricalIntegrityPolicy,
+    ) -> HistoricalCandleLoadResult:
+        self.requests.append((request.start_time_ms, request.end_time_ms))
+        gap = HistoricalDataGap(
+            symbol=request.symbol,
+            timeframe=request.timeframe,
+            start_open_time_ms=request.start_time_ms,
+            end_open_time_ms=request.end_time_ms,
+            missing_candle_count=(request.end_time_ms - request.start_time_ms) // 60_000,
+            missing_open_times_ms=tuple(range(request.start_time_ms, request.end_time_ms, 60_000)),
+            retry_count=1,
+            exchange=ExchangeName.BITMART,
+            recovery_status=HistoricalGapRecoveryStatus.UNRECOVERABLE,
+            detected_at_ms=request.end_time_ms,
+        )
+        report = HistoricalIntegrityReport.from_gaps(
+            ExchangeHistoricalCandleRequest(
+                exchange=ExchangeName.BITMART,
+                market_type=MarketType.USDT_M_PERPETUAL,
+                symbol=request.symbol,
+                timeframe=request.timeframe,
+                start_time_ms=request.start_time_ms,
+                end_time_ms=request.end_time_ms,
+                integrity_policy=integrity_policy,
+            ),
+            status=(
+                HistoricalIntegrityStatus.DEGRADED
+                if integrity_policy is HistoricalIntegrityPolicy.WARN
+                else HistoricalIntegrityStatus.INCOMPLETE
+            ),
+            gaps=(gap,),
+            requested_candle_count=gap.missing_candle_count,
+            loaded_candle_count=0,
+        )
+        return HistoricalCandleLoadResult(candles=(), integrity_report=report)
 
 
 class FixtureHistoricalLoader:

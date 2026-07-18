@@ -103,12 +103,25 @@ def create_app(runtime: BackendRuntime | None = None) -> FastAPI:
         _validate_bounded_read_request(start_time_ms=start_time_ms, end_time_ms=end_time_ms, limit=limit)
         api = runtime_from_request(request).visualization_api
         return jsonable_encoder(
-            api.get_candles(
-                symbol,
-                timeframe,
-                start_time_ms=start_time_ms,
-                end_time_ms=end_time_ms,
-                limit=limit,
+            tuple(
+                {
+                    "symbol": candle.symbol,
+                    "timeframe": candle.timeframe.value,
+                    "open_time_ms": candle.open_time_ms,
+                    "close_time_ms": candle.close_time_ms,
+                    "open": candle.open,
+                    "high": candle.high,
+                    "low": candle.low,
+                    "close": candle.close,
+                    "volume": candle.volume,
+                }
+                for candle in api.get_candles(
+                    symbol,
+                    timeframe,
+                    start_time_ms=start_time_ms,
+                    end_time_ms=end_time_ms,
+                    limit=limit,
+                )
             )
         )
 

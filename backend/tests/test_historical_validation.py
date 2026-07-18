@@ -8,6 +8,7 @@ from backend.engines.historical import (
     BitMartHistoricalCandleDownloader,
     HistoricalCandleFileStore,
     HistoricalCandleRequest,
+    HistoricalSyncPlanner,
 )
 from backend.engines.historical.loader import candle_from_bitmart_kline
 from backend.exchange import (
@@ -81,6 +82,71 @@ def test_historical_file_store_writes_and_restores_integrity_metadata(tmp_path: 
     assert store.integrity_path_for(request).exists()
     assert loaded.candles == candles
     assert loaded.integrity_report == report
+
+
+def test_historical_file_store_preserves_synthetic_no_trade_provenance(tmp_path: Path) -> None:
+    request = make_request()
+    store = HistoricalCandleFileStore(tmp_path)
+    candles = (
+        make_fixture_candles(count=1)[0],
+        synthetic_candle(60_000, previous_close=103.0),
+        make_fixture_candles(count=3)[2],
+    )
+
+    store.save(request, candles)
+    loaded = store.load(request)
+
+    assert loaded[1].source_kind == "synthetic_no_trade"
+    assert loaded[1].volume == 0
+    assert loaded[1].open == loaded[1].high == loaded[1].low == loaded[1].close == 103.0
+    plan = HistoricalSyncPlanner().plan(
+        required_start_time_ms=0,
+        required_end_time_ms=180_000,
+        cached_open_times_ms=tuple(candle.open_time_ms for candle in loaded),
+        timeframe=Timeframe.ONE_MINUTE,
+    )
+    assert plan.download_windows == ()
+
+
+def test_historical_file_store_treats_legacy_rows_without_source_kind_as_exchange(tmp_path: Path) -> None:
+    request = make_request()
+    store = HistoricalCandleFileStore(tmp_path)
+    path = store.path_for(request)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        (
+            '{"close": 101.0, "close_time_ms": 60000, "high": 102.0, "low": 99.0, '
+            '"open": 100.0, "open_time_ms": 0, "symbol": "BTCUSDT", "timeframe": "1m", "volume": 1.0}\n'
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = store.load_path(path)
+
+    assert loaded[0].source_kind == "exchange"
+
+
+def test_historical_file_store_real_exchange_candle_replaces_synthetic_duplicate(tmp_path: Path) -> None:
+    request = make_request()
+    store = HistoricalCandleFileStore(tmp_path)
+    synthetic = synthetic_candle(0, previous_close=100.0)
+    real = Candle(
+        symbol="BTCUSDT",
+        timeframe=Timeframe.ONE_MINUTE,
+        open_time_ms=0,
+        close_time_ms=60_000,
+        open=101.0,
+        high=102.0,
+        low=100.0,
+        close=102.0,
+        volume=5.0,
+    )
+
+    store.save(request, (synthetic, real))
+    loaded = store.load(request)
+
+    assert len(loaded) == 1
+    assert loaded[0] == real
 
 
 def test_historical_file_store_strict_rejects_incomplete_cache(tmp_path: Path) -> None:
@@ -344,6 +410,21 @@ def make_fixture_candles(*, count: int) -> tuple[Candle, ...]:
             ),
         )
     return tuple(candles)
+
+
+def synthetic_candle(open_time_ms: int, *, previous_close: float) -> Candle:
+    return Candle(
+        symbol="BTCUSDT",
+        timeframe=Timeframe.ONE_MINUTE,
+        open_time_ms=open_time_ms,
+        close_time_ms=open_time_ms + 60_000,
+        open=previous_close,
+        high=previous_close,
+        low=previous_close,
+        close=previous_close,
+        volume=0.0,
+        source_kind="synthetic_no_trade",
+    )
 
 
 def incomplete_report(request: HistoricalCandleRequest, *, loaded_candle_count: int) -> HistoricalIntegrityReport:
